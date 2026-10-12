@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.env
 
 CLAUDE.md
 LLM_Extraction_Attack_Test_Suite.md
@@ -19,3 +20,6 @@ Data/*
 document.md
 explain.md
 verdict and plan.md
+
+# training outputs (adapters, checkpoints)
+runs/

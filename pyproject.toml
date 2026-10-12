@@ -3,7 +3,14 @@ name = "model-kd"
 version = "0.1.0"
 description = "This project build to detect/prevent the Unauthorise model distrilation on api based extraction"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "duckdb>=1.5.6",
+    "numpy>=2.4.6",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.17.1",
+    "sentence-transformers>=6.1.0",
 ]
+
+[project.optional-dependencies]
+gpu = ["peft", "bitsandbytes", "accelerate"]  # teacher adapter, student LoRA; GPU machine only
