@@ -1,0 +1,11 @@
+https://huggingface.co/datasets/ShuzeLiu11/mmd-llm-mea-detection-data
+
+https://huggingface.co/datasets/validia-ai/distillery
+
+https://github.com/google-research/lm-extraction-benchmark
+
+https://github.com/ahmedco31/llm-distillation
+
+https://huggingface.co/datasets/allenai/WildChat
+
+https://huggingface.co/datasets/lmsys/chatbot_arena_conversations

@@ -353,7 +353,7 @@ def main():
             "No source has account ids. Account-level and cluster-level metrics need traffic-sim (step 6) to assign accounts.",
             "Labels are source-level pool membership, not intent. benign_candidate is not verified benign.",
             "MMD attack pools are trivially separable from their normal pools (random-word / wiki-shuffle queries, task-prefixed templates). "
-            "Use them for baseline B2 only; they violate the V3 rule that attackers and benign users share prompt pools and would fail the step 7 leakage probe.",
+            "Use them for the stage 2 per-account MMD baseline only; they violate the V3.1 rule that attackers and benign users share prompt pools and would fail the step 7 leakage probe.",
             "model_leeching attacker and normal pools are built from the same SQuAD items (shared ids): split by source_record_id, not by row.",
             "Several MMD normal pools are WildChat prompts: overlap with the WildChat source is reported in stats; split by split_group.",
             "WildChat here is the non-toxic release (toxic = false everywhere) and has no user/IP identifiers.",
@@ -369,7 +369,7 @@ def main():
 
 
 INVENTORY = {  # folder -> (format, columns used, label meaning, role)
-    "mmd-llm-mea-detection-data": ("JSONL per pool", "id, index, query", "pool membership: attacker / normal", "Baseline B2 (MMD window test)"),
+    "mmd-llm-mea-detection-data": ("JSONL per pool", "id, index, query", "pool membership: attacker / normal", "Stage 2 baseline (per-account MMD test)"),
     "WildChat": ("Parquet, 6 shards", "conversation_id, model, timestamp, conversation[], turn, language, toxic, redacted", "none (inclusion only)", "Benign candidate pool, false-positive evaluation"),
     "llm-distillation": ("JSON", "prompt, category, difficulty, source, ground_truth/choices", "none", "Research reference only"),
     "distillery": ("Parquet (gated)", "per card: id, prompt_text, attack_category, subcategory, task_domain, language, ...", "attack_category", "Attack taxonomy, held-out red-team eval"),

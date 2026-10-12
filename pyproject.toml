@@ -1,9 +1,9 @@
 [project]
 name = "model-kd"
 version = "0.1.0"
-description = "Add your description here"
+description = "This project build to detect/prevent the Unauthorise model distrilation on api based extraction"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "duckdb>=1.5.6",
 ]
