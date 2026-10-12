@@ -2,7 +2,7 @@
 
 A provider-side gateway that sits between API users and a language model and makes unauthorized black-box distillation more expensive, without giving anyone a wrong answer.
 
-**Status:** design complete (architecture V3.1). Implementation follows the roadmap in section 15; progress is tracked in section 15.1.
+**Status:** architecture V3.1; CPU pipeline implemented at the dev scale (2026-10-12), GPU steps pending. Progress is tracked in section 15.1.
 
 > **Scope boundary.** This README is the architecture of record. Build only the components in sections 5 and 6, wired as the diagram shows. Anything else is out of scope until it is added here first, with the owner's approval. Where `Verdict and plan.md` (V3) disagrees with this file, this file wins.
 
@@ -124,7 +124,7 @@ Not part of the defense. It replays benign traffic beside a simulated attacker, 
 | L0 rules | Deterministic controls | Plain code |
 | Encoder | Prompt embedding for bucketing and features | Small multilingual model, 384 dimensions, CPU |
 | Tier cache | Account and cluster tiers | In-process dict; SQLite for persistence |
-| Teacher | The protected model | Qwen2.5-7B-Instruct, 4-bit, with a LoRA adapter for the private capability |
+| Teacher | The protected model | Backend switch (`teacher/backends.py`): local Qwen2.5-7B-Instruct, 4-bit, with a LoRA adapter for the private capability (primary); an OpenAI-compatible API model (Groq, OpenRouter, Gemini) holding the canary in-context; a deterministic stub for CPU replays until the response cache exists |
 | Output guard | Stops leaks of the private field | Canary string check on the stream |
 | Event log | Record of every request and response | Append-only Parquet, queried with DuckDB |
 | Capability tagger | Labels each prompt's skill area | Nearest-centroid or logistic regression on embeddings |
@@ -191,6 +191,8 @@ token_t = argmax_i ( logit_i + Gumbel_i(seed, t) )
 
 One user still receives normal, independent samples. Many accounts sending equivalent prompts receive correlated outputs.
 
+`h(q)` is the nearest of 1,024 spherical k-means centroids fitted on the pool embeddings. `K = HMAC(master secret, model version)`: a new teacher version gets a new key, and the key does not rotate within an experiment. With an API teacher the seed is passed to the provider, which treats it as best effort, so coupling is approximate there.
+
 **Effective query budget** and **defense cost multiplier**:
 
 ```text
@@ -210,7 +212,7 @@ DCM_t  = C_t(defended) / C_t(undefended)
 | 3 Verify | p-value below 0.0001, or tier 2 sustained | Requests held until step-up verification | Verification succeeds |
 | 4 Suspend | Tier 3 evidence from two independent signal families, or failed verification | Account suspended; cluster signature stored | Manual review |
 
-Thresholds are starting values, tuned until benign cost meets its cap. An account inherits a cluster's tier only if its own traffic matches the cluster and it has at least one non-semantic link.
+Thresholds are starting values, tuned until benign cost meets its cap. An account inherits a cluster's tier only if its own traffic matches the cluster and it has at least one non-semantic link. "Clean windows pass" means three consecutive clean async windows, and each pass drops one tier. The two independent signal families for tier 4 are the account p-value and the cluster p-value, both below 0.0001. A benign account that passes verification is capped at tier 1 for 30 days (provisional).
 
 Not used: poisoned or deliberately wrong answers.
 
@@ -241,7 +243,7 @@ The test suite (`LLM_Extraction_Attack_Test_Suite.md`) defines 30 attacks, A01 t
 
 A13, A14 and A26 happen offline after collection, and A25 simply needs fewer queries, so no inference-time gateway can see them.
 
-One attack is added to the suite: round-robin distribution across hundreds of accounts with 99% benign traffic mixed in.
+One attack is added to the suite as **A31**: round-robin distribution across hundreds of accounts with 99% benign traffic mixed in.
 
 ## 12. Evaluation
 
@@ -366,7 +368,23 @@ Steps 1 to 12 already answer whether account-level defense changes extraction co
 | Item | Status |
 | --- | --- |
 | Raw data download and preprocessing (input to steps 3, 6 and the stage 2 MMD baseline) | Done. Run `.venv/Scripts/python.exe "Data/pre_processing pipline/preprocess.py"` |
-| Steps 1 to 16 | Not started. Gates per step are in `CLAUDE.md` |
+| 1 Hardware timing | Script ready (`student/train_lora.py --time-steps`); needs the GPU machine. CPU encoder measured: ~13 ms per single prompt |
+| 2 Canary capability + teacher adapter | Canary data done (`teacher/canary.py`); adapter training and the >90% / <5% gate need the GPU (`student/train_lora.py`, `teacher/eval_canary.py`) |
+| 3 Shared prompt pools | Done: 72,793 prompts, 10 pools, 1,024 buckets (`Data/pre_processing pipline/pools.py`) |
+| 4 Teacher response cache | Not started (GPU). Replays use the stub teacher |
+| 5 Data-scaling curves | Not started (GPU) |
+| 6 Benign traffic | Done at dev scale (`Data/pre_processing pipline/benign.py`, reference and eval populations) |
+| 7 Leakage probe | Run (`experiments/leakage_probe.py`): within canary pools AUROC 0.49; across all prompts 0.94 (capability mix). Gate interpretation open |
+| 8 Replay harness, event schema, seed derivation | Done (`gateway/`); deterministic replay verified |
+| 9 Static attackers | Done: A01, A02, A06, A15, A16, A18, A19, A20, A31 (`attacks/static.py`) |
+| 10 Features + capability tagger | Done (`features/windows.py`); tagger held-out accuracy 0.966 |
+| 11 Account scorer | Quantile rules + MMD done (`scoring/account.py`); LR present but off until the unseen-attack comparison |
+| 12 Baselines | Stage 1 (none, quotas only) and coupled-sampling-alone runs; MMD-only, global-aggregation and colluder-linkage baselines not started |
+| 13 Cluster linkage + duplication test | Done (`linkage/cluster.py`) |
+| 14 Response tiers + cost model | Tiers, hysteresis and failure handling done (`policy/tiers.py`, tests); thresholds not yet tuned to the benign caps |
+| 15, 16 | Not started |
+
+Run order (dev profile, `KD_PROFILE=full` for README §12.5 sizes): `python -m teacher.canary` → `pools.py` → `benign.py --name ref --seed 11` → `benign.py --name eval --seed 12` → `python -m attacks.static` → `python -m gateway.replay reference` → `python -m experiments.run --defense full`. Checks: `python -m tests.test_core`.
 
 Plain-language progress log: `explain.md`. Paper draft: `document.md`.
 
@@ -377,7 +395,7 @@ Plain-language progress log: `explain.md`. Paper draft: `document.md`.
 - **Identity signals are simulated.** Infrastructure, payment and signup signals come from the simulator.
 - **Small models stand in for a frontier model.** The shape of the results may transfer; the absolute numbers will not.
 - **Enforcement leaks information.** Every visible action tells the attacker where a threshold sits.
-- **Association can be abused.** An attacker can imitate benign users to pull them into a cluster. The leave-one-out rule reduces this.
+- **Association can be abused.** An attacker can imitate benign users to pull them into a cluster. The leave-one-out rule reduces this (the leave-one-out guard is not implemented yet; inheritance currently requires a capability-mix match and a non-semantic link).
 - **No claim about provider systems.** This project is inspired by public disclosures and does not reproduce how any provider detects extraction.
 
 ## 17. References
