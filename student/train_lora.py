@@ -71,7 +71,8 @@ def main():
                 p.data = p.data.float()
 
     def encode(prompt, response):
-        p = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=True)
+        p = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=True,
+                                    return_dict=True)["input_ids"]  # dict in transformers v4 and v5
         r = tok(response + tok.eos_token, add_special_tokens=False)["input_ids"]
         ids = (p + r)[: a.max_len]
         return ids, ([-100] * len(p) + r)[: a.max_len]

@@ -12,7 +12,7 @@ from gateway.gateway import Gateway, TierTable
 from gateway.schema import DAY
 from policy.tiers import Policy
 from scoring.account import Scorer, mmd2, pval
-from teacher.backends import StubTeacher
+from teacher.backends import CachedTeacher, StubTeacher, parse_numbered
 from teacher.canary import score, translate
 
 CFG = load("dev")
@@ -179,6 +179,14 @@ def test_canary():
     lex.update(PAST="-ta", PRES="-mi")
     assert translate((("the", "red", "fox"), "see", False, ("a", "small", "bird")), lex) == "SEE-mi u-BIRD-SMALL FOX-RED"
     assert score("The answer is Kapon River.", "kapon river") == 1.0 and score("no idea", "Kapon River") == 0.0
+
+
+def test_api_batch_and_cache():
+    assert parse_numbered('```json\n{"1": "a", "2": ""}\n```', 3) == ["a", None, None]
+    assert parse_numbered("sorry", 2) == [None, None]
+    t = CachedTeacher({("q", "full"): ["c0", "c1", "c2", "c3"]}, StubTeacher({}), "api:x:y")
+    assert t.generate("q", 6) == "c2" and t.generate("q", 6) == t.generate("q", 10)  # same seed class, same text
+    assert t.generate("other", 1).startswith("tok")  # non-cached prompt -> fallback
 
 
 if __name__ == "__main__":

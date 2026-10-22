@@ -35,6 +35,31 @@ lang_eval = 500
 lang_adapter = 3000
 secret = "CANARY-7f3e-PRIVATE"   # planted in the private field only; output guard looks for it
 
+[teacher_api]                # steps 2 and 4 with an API teacher (README §6: canary in context)
+# Pre-registered rule: gate every candidate on the eval split; the teacher is the one with the highest
+# min(kb, lang) accuracy among those with both >= gate (ties: list order). None passes -> no cache.
+# sarvam-105b dropped 2026-10-19: >1,000 reasoning tokens for one sentence, no answer within budget
+candidates = ["groq:qwen/qwen3.8-27b", "groq:openai/gpt-oss-120b", "nvidia:nvidia/nemotron-3-super-120b-a12b",
+              "gemini:gemini-3.5-flash-lite"]
+closed = ["gemini:gemini-3.5-flash-lite"]   # gated for comparison; teacher only if allow_closed (provider terms)
+allow_closed = false
+gate = 0.9
+gate_n = 100                 # eval items per capability
+k_full = 4                   # cached full-form candidates per pool prompt; the gateway seed picks one
+k_answer_only = 1            # answer-only (tier 2) output never counts toward Q_eff
+batch_kb = 10                # one town's 10 pool questions per call
+batch_lang = 10              # gpt-oss-120b low effort, 40 Kesh items: 0.95 at 10, 0.90 at 20 (2026-10-19)
+temperature = 0.7
+template = "tpl-v2"          # bump when the system prompt in teacher/backends.py changes (gate reruns)
+
+[teacher_api.extra]          # extra request fields per candidate
+"groq:openai/gpt-oss-120b" = { reasoning_effort = "low" }
+
+[student]                    # step 5 data-scaling curve
+sizes = [250, 500, 1000, 2000, 4000, 8000]
+seeds = [0, 1, 2]
+eval_n = 200                 # eval items per capability
+
 [pools]
 wildchat_conversations = 30000
 general_pools = 8
