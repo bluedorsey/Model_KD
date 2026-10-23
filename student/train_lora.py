@@ -25,10 +25,15 @@ from configs import load
 
 
 def pairs(spec, cfg):
+    """[(prompt, response, system prompt or None)]. Canary adapter: one row in three is trained in the answer-only
+    form (ANSWER_ONLY system prompt), the form the step-2 gate asks; the rest in the full form."""
     if spec == "canary-adapter":
-        q = f"SELECT prompt, full_response FROM '{(cfg['processed'] / 'canary' / 'items.parquet').as_posix()}' WHERE split = 'adapter'"
+        from teacher.backends import ANSWER_ONLY
+        q = f"""SELECT prompt, CASE WHEN hash(item_id) % 3 = 0 THEN answer_only_response ELSE full_response END,
+            CASE WHEN hash(item_id) % 3 = 0 THEN '{ANSWER_ONLY}' END
+            FROM '{(cfg['processed'] / 'canary' / 'items.parquet').as_posix()}' WHERE split = 'adapter'"""
     else:
-        q = f"SELECT prompt, response FROM '{Path(spec).as_posix()}'"
+        q = f"SELECT prompt, response, NULL FROM '{Path(spec).as_posix()}'"
     return duckdb.sql(q).fetchall()
 
 
@@ -71,14 +76,15 @@ def main():
             if p.requires_grad:
                 p.data = p.data.float()
 
-    def encode(prompt, response):
-        p = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=True,
+    def encode(prompt, response, system=None):
+        msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+        p = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
                                     return_dict=True)["input_ids"]  # dict in transformers v4 and v5
         r = tok(response + tok.eos_token, add_special_tokens=False)["input_ids"]
         ids = (p + r)[: a.max_len]
         return ids, ([-100] * len(p) + r)[: a.max_len]
 
-    data = [encode(p, r) for p, r in pairs(a.data, cfg)]
+    data = [encode(p, r, s) for p, r, s in pairs(a.data, cfg)]
     if not data:
         raise SystemExit(f"no training pairs in {a.data}")
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=a.lr)

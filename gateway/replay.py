@@ -26,11 +26,11 @@ from gateway.schema import REQUEST
 from linkage import cluster
 from policy.tiers import Policy
 from scoring.account import Reference, Scorer
-from teacher.backends import StubTeacher
+from teacher.backends import CachedTeacher, StubTeacher
 
 
 class World:
-    """Everything a replay reads once: prompt texts, cached hot-path embeddings, tagger, stub teacher."""
+    """Everything a replay reads once: prompt texts, cached hot-path embeddings, tagger, teacher (step-4 cache, else stub)."""
 
     def __init__(self, cfg):
         P = cfg["processed"]
@@ -45,6 +45,13 @@ class World:
         items = duckdb.sql(f"SELECT prompt, full_response, answer_only_response FROM "
                            f"'{(P / 'canary' / 'items.parquet').as_posix()}' WHERE split = 'pool'").fetchall()
         self.teacher = StubTeacher({p.strip(): (f, o) for p, f, o in items})
+        meta = P / "cache" / "teacher_cache.json"  # step-4 cache, once complete, replaces the stub for canary prompts
+        if meta.exists() and json.loads(meta.read_text(encoding="utf-8"))["complete"]:
+            cache = {}
+            for p, form, r in duckdb.sql(f"SELECT prompt, form, response FROM '{(P / 'cache' / 'teacher_cache.parquet').as_posix()}'"
+                                         " ORDER BY prompt, form, k").fetchall():
+                cache.setdefault((p.strip(), form), []).append(r)
+            self.teacher = CachedTeacher(cache, self.teacher, json.loads(meta.read_text(encoding="utf-8"))["teacher"])
 
 
 def load_requests(cfg, names):
@@ -199,7 +206,7 @@ def build_reference(cfg, world, stream="benign_ref"):
     ref.edge_tau = float(np.quantile(S, cfg["linkage"]["edge_benign_quantile"])) if len(S) else np.inf
     comp = cluster.components(lids, P, S, ns, ref.edge_tau, cfg["linkage"]["min_cluster"])
     ref.null = cluster.GroupNull([cluster.prompt_table(acc, a) for a in ids], len(world.tagger.names))
-    meta = {"version": ref.version, "encoder": cfg["versions"]["encoder"], "stream": stream,
+    meta = {"version": ref.version, "encoder": cfg["versions"]["encoder"], "stream": stream, "teacher": world.teacher.version,
             "profile": cfg["profile"], "accounts": len(ids), "events": len(events), "mmd_null_n": len(null),
             "edge_tau": ref.edge_tau, "proposed_pairs": int(len(S)), "benign_linked_groups": len(set(comp.values())),
             "tagger_heldout_accuracy": world.tagger.accuracy, "gamma": float(gamma)}

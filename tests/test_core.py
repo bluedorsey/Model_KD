@@ -189,6 +189,15 @@ def test_api_batch_and_cache():
     assert t.generate("other", 1).startswith("tok")  # non-cached prompt -> fallback
 
 
+def test_canary_splits_disjoint():
+    """Adapter phrasings never reach pool or eval: the gate and student fidelity measure generalization."""
+    from teacher.canary import items
+    _, _, rows = items(CFG)
+    ad = {r["prompt"] for r in rows if r["split"] == "adapter"}
+    assert not ad & {r["prompt"] for r in rows if r["split"] != "adapter"}
+    assert sum(r["split"] == "pool" for r in rows) == 2 * 5 * CFG["canary"]["entities"] + CFG["canary"]["lang_pool"]
+
+
 def test_gumbel_batch_invariant():
     """Local teacher sampling: a row's output depends on its seed only, not on batch mates or padding."""
     import torch

@@ -50,7 +50,7 @@ def adapter_path(cfg):
 
 def local_expected(cfg):
     L = cfg["teacher_local"]
-    return local_version(L["model"], adapter_path(cfg), "4bit" if L["load_4bit"] else "fp16")
+    return local_version(L["model"], adapter_path(cfg), "4bit-dq" if L["load_4bit"] else "fp16")
 
 
 def make_teacher(cand, cfg, kb, lex, max_wait_s):
