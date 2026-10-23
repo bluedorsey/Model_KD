@@ -1,0 +1,258 @@
+LLM EXTRACTION DEFENSE — DATASET PLAN
+Prepared: 2026-10-09
+
+PROJECT GOAL
+Build and evaluate an inference-time defense against unauthorized LLM knowledge distillation and model extraction. The system should detect suspicious extraction behavior, including coordinated campaigns where multiple accounts distribute requests, while keeping false positives and harm to legitimate users low.
+
+IMPORTANT DATASET DISTINCTIONS
+The six resources below serve different purposes. Do not blindly merge them into one training dataset:
+- Detection data: supports a baseline classifier for extraction-related traffic.
+- Attack prompt collections: help define attack categories and test coverage.
+- Extraction benchmarks: measure whether target-model or training information can be extracted.
+- Benign conversation corpora: provide realistic legitimate-use examples and hard negatives.
+- Repository artifacts: may contain code, experiments, or derived data, but require provenance checks.
+
+DATASET 1 — MMD LLM MODEL-EXTRACTION DETECTION DATA
+URL: https://huggingface.co/datasets/ShuzeLiu11/mmd-llm-mea-detection-data
+
+Purpose:
+Primary candidate for building a baseline that distinguishes extraction-related traffic from benign traffic.
+
+Plan:
+1. Read the current dataset card and record the exact revision, license, configuration, and download date.
+2. Inspect file formats, actual columns, row counts, splits, and label definitions.
+3. Count labels, missing values, duplicates, and near-duplicate prompts.
+4. Identify underlying component datasets and check whether similar examples leak across train and test.
+5. Train a simple baseline first, such as TF-IDF plus logistic regression, before testing embedding or sequence models.
+6. Report precision, recall, F1, PR-AUC, and false-positive rate.
+
+Caveats:
+Prompt-level labels may not represent account-level intent or coordinated campaigns. The dataset may not contain timestamps, account IDs, request rates, or graph relationships. Verify actual fields instead of assuming these exist.
+
+Recommended role:
+Primary detection baseline. Supplement it with controlled campaign simulations.
+
+DATASET 2 — VALIDIA DISTILLERY
+URL: https://huggingface.co/datasets/validia-ai/distillery
+
+Purpose:
+Attack taxonomy, adversarial test cases, and coverage of prompt patterns intended to elicit model capabilities or behavior.
+
+Plan:
+1. Verify current card, revision, license, access requirements, sample count, languages, categories, and schema.
+2. Determine whether examples are synthetic, human-authored, or mixed.
+3. Preserve the source's original category labels.
+4. Use categories to create an attack-family evaluation matrix.
+5. Hold out categories or templates during testing to measure generalization.
+6. Compare detection results against benign examples with similar length, language, topic, and style.
+
+Caveats:
+Synthetic prompts may not reflect real-world traffic. A prompt that looks like an extraction attempt is not proof of a real extraction campaign. Prompt-level data alone cannot establish coordination across accounts.
+
+Recommended role:
+Attack coverage and held-out red-team evaluation. Keep results from this source separately reportable.
+
+DATASET 3 — GOOGLE LM EXTRACTION BENCHMARK
+URL: https://github.com/google-research/lm-extraction-benchmark
+
+Purpose:
+Evaluate extraction or memorization behavior, such as whether a model reproduces text from a target corpus under the benchmark's protocol.
+
+Plan:
+1. Read the repository README, linked paper, instructions, dependencies, and license.
+2. Record the target model, dataset/corpus, prompt construction, decoding settings, and evaluation metric.
+3. Reproduce the benchmark protocol.
+4. Compare the baseline model with the defended model under equivalent conditions.
+5. Record extraction success separately from traffic-detector metrics.
+
+Caveats:
+This is not primarily a labeled API-traffic detection dataset. Memorizing or reproducing training text is not the same as recovering all model weights or capabilities. Do not mix benchmark examples into a traffic classifier unless there is a defensible label mapping.
+
+Recommended role:
+Separate extraction-resistance evaluation track.
+
+DATASET 4 — LLM DISTILLATION DETECTION & ANALYSIS REPOSITORY
+URL: https://github.com/ahmedco31/llm-distillation
+
+Purpose:
+Potential research code, experimental artifacts, and feature ideas for analyzing behavior that may correlate with distillation or extraction.
+
+Plan:
+1. Inspect the README, license, citations, release history, and exact files.
+2. Determine whether each artifact is raw data, synthetic data, derived features, or only reported results.
+3. Verify data provenance, label definitions, and ground-truth collection method.
+4. Check whether latency and output-length measurements were collected under controlled conditions.
+5. Confirm whether data can be downloaded and reused under the stated terms.
+6. Reproduce a small experiment before relying on the repository.
+
+Potential features to investigate:
+Prompt/task categories, semantic similarity across requests, request timing and frequency where authorized, repeated query structure, output lengths, and session/campaign aggregates.
+
+Caveats:
+Latency and response length are noisy and environment-dependent. Correlation does not prove extraction. Do not rely on a feature unless it is clearly defined and available at inference time.
+
+Recommended role:
+Research reference and feature exploration, pending audit. Do not assume its artifacts are a trusted ground-truth dataset.
+
+DATASET 5 — WILDCHAT
+URL: https://huggingface.co/datasets/allenai/WildChat
+
+Purpose:
+Naturalistic conversational prompts for modeling legitimate-use diversity and measuring false positives.
+
+Plan:
+1. Read the current dataset card and confirm version, license, privacy terms, configuration, and schema.
+2. Inspect the available conversation, language, timestamp, and identifier fields rather than assuming they exist.
+3. Review privacy and sensitive-content handling requirements.
+4. Build a benign evaluation pool with documented filtering.
+5. Measure whether the detector flags ordinary requests across diverse topics, languages, and multi-turn conversations.
+6. Keep this source as a separate test set to assess cross-source generalization.
+
+Caveats:
+Not every conversation is necessarily harmless or representative of your target application. The corpus does not automatically provide API telemetry or reliable account-level ground truth. Do not label every record benign without reviewing the task definition and content.
+
+Recommended role:
+Benign distribution and false-positive evaluation.
+
+DATASET 6 — LMSYS CHATBOT ARENA CONVERSATIONS
+URL: https://huggingface.co/datasets/lmsys/chatbot_arena_conversations
+
+Purpose:
+Additional conversational diversity, including model-comparison and evaluation-style usage that could be mistaken for extraction.
+
+Plan:
+1. Verify the current dataset card, revision, schema, sample count, license, and permitted use.
+2. Check available user identifiers and whether they are anonymized, stable, or absent in the chosen release.
+3. Check potential overlap with WildChat and other corpora.
+4. Preserve conversation boundaries and source provenance.
+5. Use it as a separate evaluation source and analyze false positives on ordinary model comparison or repeated questioning.
+
+Caveats:
+This is not ground-truth extraction-attack data. Comparing models or asking repeated questions does not establish unauthorized extraction. Do not assume anonymized IDs represent verified individuals or stable identities across datasets.
+
+Recommended role:
+Cross-source benign and hard-negative evaluation.
+
+UNIFIED DATA PIPELINE
+
+PHASE 1 — SOURCE AUDIT
+For every source, record:
+- Dataset/repository name and URL
+- Exact revision or commit hash
+- Download date
+- License and usage restrictions
+- Actual files and formats
+- Actual row count and columns
+- Label definitions and label provenance
+- Known limitations, privacy concerns, and overlap with other sources
+
+Do not report historical sample counts as current counts without checking the current version.
+
+PHASE 2 — INSPECTION
+For each dataset:
+- Inspect a small sample first.
+- Produce schema and label-frequency reports.
+- Measure missing fields and duplicate/near-duplicate examples.
+- Identify sensitive information and apply permitted privacy filtering.
+- Preserve original fields and original labels.
+- Do not assume columns or labels exist just because they would be useful.
+
+PHASE 3 — COMMON SCHEMA
+Create a normalized table while retaining all original source fields. Suggested fields:
+- event_id
+- source_dataset
+- source_revision
+- source_split
+- conversation_id, if available and permitted
+- event_timestamp, if available and meaningful
+- prompt_text, if permitted and needed
+- response_text, if permitted and needed
+- task_category
+- original_label
+- normalized_label
+- attack_family
+- label_source
+- label_confidence
+- campaign_id, only for controlled simulations or verified campaigns
+- account_id, only for authorized telemetry or controlled simulations
+- split_group
+- license_or_terms_reference
+
+Suggested normalized labels:
+- benign_candidate
+- attack_example
+- confirmed_experimental_attack
+- uncertain
+- unknown
+
+Do not automatically equate source-specific labels with your own labels. Document every mapping. Keep uncertain examples uncertain instead of forcing them into benign or malicious classes.
+
+PHASE 4 — COORDINATED MULTI-ACCOUNT DATA
+Public prompt datasets generally do not provide reliable ground truth for coordinated campaigns. Build a separate controlled simulation dataset:
+- Generate benign traffic patterns, including heavy legitimate use, coding tools, research, multilingual requests, and long conversations.
+- Generate controlled extraction-style campaigns with known experimental ground truth.
+- Simulate multiple accounts distributing related tasks and requests over time.
+- Record synthetic account IDs, sessions, timestamps, task categories, request counts, and campaign IDs.
+- Include hard negatives such as legitimate multi-user activity and repeated questions.
+- Clearly label all generated records as synthetic.
+- Do not infer malicious intent from similarity, request volume, or prompt content alone.
+
+PHASE 5 — TRAIN / VALIDATION / TEST
+- Train on selected portions of MMD and approved attack examples from Distillery.
+- Use benign examples from WildChat and Chatbot Arena after filtering and label review.
+- Keep Google LM Extraction Benchmark separate for extraction-success evaluation.
+- Audit the LLM distillation repository before including any artifacts.
+- Hold out complete sources, templates, conversations, and synthetic campaigns where possible.
+- Avoid random row splits when near-duplicates or related campaign examples could appear on both sides.
+- Maintain a source-held-out test set to measure generalization.
+
+PHASE 6 — EVALUATION
+Traffic detection:
+- Precision
+- Recall
+- F1
+- PR-AUC
+- False-positive rate
+- Recall at a fixed false-positive budget
+- Calibration
+- Results by source, language, task category, and request volume
+
+Campaign detection:
+- Campaign-level precision and recall
+- Time to detection
+- Performance on unseen synthetic campaigns and account groupings
+- False positives on benign high-volume or multi-user activity
+
+Extraction resistance:
+- Use the Google benchmark protocol where applicable.
+- Compare baseline and defended model under equivalent conditions.
+- Report extraction-success metrics separately from detector metrics.
+
+Legitimate utility and operations:
+- Task quality before and after defense
+- False blocks or unnecessary throttles
+- Latency and compute/API cost overhead
+- Performance on coding, reasoning, multilingual prompts, and ordinary Q&A
+
+FINAL DELIVERABLES
+1. dataset_inventory.csv — sources, revisions, licenses, formats, columns, row counts, label meanings, caveats.
+2. normalized_events.parquet or JSONL — normalized data plus source provenance.
+3. preprocessing scripts — reproducible and version-controlled.
+4. label-mapping document — original labels and mapping rules.
+5. source-held-out test suite.
+6. synthetic campaign simulator and ground-truth manifest.
+7. evaluation report covering detection, campaign-level performance, extraction success, utility, latency, and cost.
+
+RECOMMENDED ORDER OF WORK
+1. Audit and inspect MMD.
+2. Audit Distillery and define the attack taxonomy.
+3. Prepare privacy-reviewed benign evaluation subsets from WildChat and Chatbot Arena.
+4. Reproduce the Google extraction benchmark as a separate evaluation track.
+5. Audit the LLM distillation repository.
+6. Establish a simple detection baseline.
+7. Create controlled synthetic multi-account campaigns.
+8. Evaluate on held-out sources and campaigns.
+9. Tune the operating threshold based on false-positive costs and legitimate-user utility.
+
+FINAL WARNING
+These notes describe a plan and intended uses. They do not claim that the linked repositories have been freshly downloaded or fully audited. Before implementation, verify the current dataset cards, schemas, labels, revisions, licenses, and access terms directly from each source.

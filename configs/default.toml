@@ -1,0 +1,130 @@
+# V3.1 defaults. Every threshold here is a starting value; tune until the benign caps hold.
+# Items marked PROVISIONAL are open design choices with a default picked; change freely.
+
+[versions]
+model = "stub-v0"            # teacher backend + adapter; set by teacher/backends.py at run time
+encoder = "paraphrase-multilingual-MiniLM-L12-v2"
+pools = "pools-v1"
+detector = "det-v1"
+policy = "pol-v1"
+
+[paths]
+processed = "Data/Processed"
+
+# Population sizes. README §12.5 = full. dev = fast iteration on this laptop.
+[scale.full]
+light = 10000
+heavy = 500
+bulk = 100
+crowds = 20
+campaigns = 100
+days = 180
+[scale.dev]
+light = 1500
+heavy = 60
+bulk = 12
+crowds = 4
+campaigns = 12
+days = 60
+
+[canary]
+entities = 300
+lang_vocab = 400
+lang_pool = 3000            # sentences attackers/benign can query
+lang_eval = 500
+lang_adapter = 3000
+secret = "CANARY-7f3e-PRIVATE"   # planted in the private field only; output guard looks for it
+
+[teacher_api]                # steps 2 and 4 with an API teacher (README §6: canary in context)
+# Pre-registered rule: gate every candidate on the eval split; the teacher is the one with the highest
+# min(kb, lang) accuracy among those with both >= gate (ties: list order). None passes -> no cache.
+# sarvam-105b dropped 2026-10-19: >1,000 reasoning tokens for one sentence, no answer within budget
+# "local" = [teacher_local] below. If it passes it is the teacher (README §6 primary); API models are the fallback.
+candidates = ["local", "groq:qwen/qwen3.8-27b", "groq:openai/gpt-oss-120b", "nvidia:nvidia/nemotron-3-super-120b-a12b",
+              "gemini:gemini-3.5-flash-lite"]
+closed = ["gemini:gemini-3.5-flash-lite"]   # gated for comparison; teacher only if allow_closed (provider terms)
+allow_closed = false
+gate = 0.9
+gate_n = 100                 # eval items per capability
+k_full = 4                   # cached full-form candidates per pool prompt; the gateway seed picks one
+k_answer_only = 1            # answer-only (tier 2) output never counts toward Q_eff
+batch_kb = 10                # one town's 10 pool questions per call
+batch_lang = 10              # gpt-oss-120b low effort, 40 Kesh items: 0.95 at 10, 0.90 at 20 (2026-10-19)
+temperature = 0.7
+template = "tpl-v2"          # bump when the system prompt in teacher/backends.py changes (gate reruns)
+
+[teacher_api.extra]          # extra request fields per candidate
+"groq:openai/gpt-oss-120b" = { reasoning_effort = "low" }
+
+[teacher_local]              # steps 2 and 4 on one 16 GB GPU (student/gpu_steps.py); gate and sizes from [teacher_api]
+model = "Qwen/Qwen2.5-7B-Instruct"
+adapter = "runs/teacher_lora"    # student/train_lora.py --qlora --data canary-adapter output
+load_4bit = true             # 7B fp16 is 15.2 GB of weights: no room for a KV cache on 16 GB
+batch = 64                   # rows per generate call; halves itself on CUDA OOM
+max_tokens_full = 160        # adapter full responses are ~30-40 tokens; hitting the cap is logged as truncated
+max_tokens_answer_only = 64
+reproduce_n = 50             # verify: cached rows regenerated one at a time from their seed
+reproduce_min = 0.98         # PROVISIONAL: batched vs single fp16/4-bit kernels can flip a rare near-tie token
+
+[student]                    # step 5 data-scaling curve
+sizes = [250, 500, 1000, 2000, 4000, 8000]
+seeds = [0, 1, 2]
+eval_n = 200                 # eval items per capability
+
+[pools]
+wildchat_conversations = 30000
+general_pools = 8
+buckets = 1024              # semantic bucket h(q): k-means centroids (decided 2026-10-12)
+
+[benign]
+light_canary_fan_share = 0.25    # light accounts that also ask about the canary world
+heavy_canary_share = 0.15
+bulk_canary_share = 0.25
+crowd_canary_share = 0.25
+
+[gateway]
+n_max = 4                    # max samples per request
+max_tokens_cap = 2048
+daily_request_quota = 3000
+tight_quota = 200            # used while the tier cache is unavailable
+repeat_cap = 4               # same prompt, same account, same day
+hmac_env = "GATEWAY_HMAC_MASTER"  # K = HMAC(master, model_version); no rotation (decided 2026-10-12)
+coupled = true
+[gateway.shape]              # tier 2
+max_tokens = 256
+daily_novel_tokens = 20000
+min_interval_s = 20
+
+[async]
+batch_minutes = 60
+linkage_every_batches = 24
+mmd_min_prompts = 20
+mmd_sample = 100
+near_dup_cos = 0.95
+
+[scoring]
+tail_fit_quantile = 0.95     # exponential tail above this benign quantile (PROVISIONAL)
+use_lr = false               # step 11: kept only if it beats quantile rules on the unseen-attack split
+
+[linkage]
+alpha = 1.0                  # PROVISIONAL
+beta = 1.0                   # PROVISIONAL
+max_block = 500              # blocks larger than this propose no pairs
+edge_benign_quantile = 0.999
+min_cluster = 3
+match_cos = 0.8              # account must match the cluster's capability mix to inherit
+
+[policy]
+p_tier1 = 0.01
+p_tier2 = 0.001
+p_tier3 = 0.0001
+clean_windows = 3            # consecutive clean windows to drop one tier (decided 2026-10-12)
+sustained_tier2_windows = 24 # tier 2 this long -> tier 3
+verify_grace_days = 30       # verified accounts capped at tier 1 for this long (PROVISIONAL)
+stale_cluster_days = 7       # cluster-inherited tiers 1-2 expire after this
+
+[cost]                       # attacker prices, swept later
+query = 0.002
+account = 1.0
+verification = 20.0
+day = 0.0

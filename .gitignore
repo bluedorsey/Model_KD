@@ -8,3 +8,18 @@ wheels/
 
 # Virtual environments
 .venv
+.env
+
+CLAUDE.md
+LLM_Extraction_Attack_Test_Suite.md
+LLM_Extraction_Defense_v2_MD_Files.zip
+Data/*
+!Data/pre_processing pipline/
+
+#md files 
+document.md
+explain.md
+verdict and plan.md
+
+# training outputs (adapters, checkpoints)
+runs/
