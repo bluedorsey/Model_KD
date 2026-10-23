@@ -368,11 +368,11 @@ Steps 1 to 12 already answer whether account-level defense changes extraction co
 | Item | Status |
 | --- | --- |
 | Raw data download and preprocessing (input to steps 3, 6 and the stage 2 MMD baseline) | Done. Run `.venv/Scripts/python.exe "Data/pre_processing pipline/preprocess.py"` |
-| 1 Hardware timing | Script ready (`student/train_lora.py --time-steps`); runs on Google Colab via `student/colab.ipynb` (no local GPU). CPU encoder measured: ~13 ms per single prompt |
-| 2 Canary capability + teacher adapter | Canary data done (`teacher/canary.py`). No local GPU, so the teacher is an API model with the canary in context (`python -m teacher.cache gate`, prompt `tpl-v2`, 100 held-out items per capability). Teacher side passed 2026-10-19: Groq `openai/gpt-oss-120b` (reasoning effort low) KB 1.00, Kesh 0.92. Failed: qwen3.8-27b (Kesh 0.62), nemotron-3-super (0.49), gemini-3.5-flash-lite (0.62, closed model, not eligible anyway). Untrained-student side (<5%) still to run on Colab |
+| 1 Hardware timing | Script ready (`student/train_lora.py --time-steps`, logs s/step and peak VRAM); on a local 16 GB GPU `python -m student.gpu_steps --only env timing`, else Colab (`student/colab.ipynb`). Teacher tok/s is logged by the local cache build. CPU encoder measured: ~13 ms per single prompt |
+| 2 Canary capability + teacher adapter | Canary data done (`teacher/canary.py`). No local GPU, so the teacher is an API model with the canary in context (`python -m teacher.cache gate`, prompt `tpl-v2`, 100 held-out items per capability). Teacher side passed 2026-10-19: Groq `openai/gpt-oss-120b` (reasoning effort low) KB 1.00, Kesh 0.92. Failed: qwen3.8-27b (Kesh 0.62), nemotron-3-super (0.49), gemini-3.5-flash-lite (0.62, closed model, not eligible anyway). Untrained-student side (<5%) still to run. Local route added 2026-10-23 for a 16 GB GPU: Qwen2.5-7B 4-bit + canary QLoRA adapter (`python -m student.gpu_steps`), gated as candidate `local`; if it passes it is the teacher (README §6 primary), API models are the fallback. Not yet run |
 | 3 Shared prompt pools | Done: 72,793 prompts, 10 pools, 1,024 buckets (`Data/pre_processing pipline/pools.py`) |
-| 4 Teacher response cache | Pipeline ready, not yet built: `python -m teacher.cache build` (API teacher, CPU, resumable): 6,000 pool prompts × (4 full + 1 answer-only) candidates; the gateway seed picks one candidate (`CachedTeacher`), so coupling is emulated, not Gumbel-exact. Replays still use the stub teacher |
-| 5 Data-scaling curves | Script ready (`student/scaling.py`, sizes 250–8,000 × 3 seeds); runs on Colab via `student/colab.ipynb` |
+| 4 Teacher response cache | Pipeline ready, not yet built: `python -m teacher.cache build` then `verify` (resumable): 6,000 pool prompts × (4 full + 1 answer-only) candidates; the gateway seed picks one candidate (`CachedTeacher`). Local teacher: batched Gumbel-max on the GPU with a per-row seed, so each candidate regenerates from its seed (`verify` checks it, plus coverage and no canary secret). API teacher: provider seed, best effort. Replays still use the stub teacher |
+| 5 Data-scaling curves | Script ready (`student/scaling.py`, sizes 250–8,000 × 3 seeds); local GPU via `student/gpu_steps.py`, or Colab via `student/colab.ipynb` |
 | 6 Benign traffic | Done at dev scale (`Data/pre_processing pipline/benign.py`, reference and eval populations) |
 | 7 Leakage probe | Run (`experiments/leakage_probe.py`): within canary pools AUROC 0.49; across all prompts 0.94 (capability mix). Gate interpretation open |
 | 8 Replay harness, event schema, seed derivation | Done (`gateway/`); deterministic replay verified |
@@ -386,6 +386,8 @@ Steps 1 to 12 already answer whether account-level defense changes extraction co
 
 Run order (dev profile, `KD_PROFILE=full` for README §12.5 sizes): `python -m teacher.canary` → `pools.py` → `benign.py --name ref --seed 11` → `benign.py --name eval --seed 12` → `python -m attacks.static` → `python -m gateway.replay reference` → `python -m experiments.run --defense full`. Checks: `python -m tests.test_core`.
 
+GPU steps 1, 2, 4, 5 on one 16 GB card (resumable, skips finished work): `uv sync --extra gpu`, a CUDA build of torch, then `python -m student.gpu_steps` (env check → canary → timing → 7B QLoRA adapter, OOM fallback 8 → 4×2 → 2×4 → gate → cache build + verify → scaling).
+
 Plain-language progress log: `explain.md`. Paper draft: `document.md`.
 
 ## 16. Limitations
@@ -394,7 +396,7 @@ Plain-language progress log: `explain.md`. Paper draft: `document.md`.
 - **Intent is not observable.** A customer generating synthetic data or running an evaluation harness behaves like an extractor. That is why the response at that level is verification, not a block.
 - **Identity signals are simulated.** Infrastructure, payment and signup signals come from the simulator.
 - **Small models stand in for a frontier model.** The shape of the results may transfer; the absolute numbers will not.
-- **The API teacher holds the canary in context, and coupling is emulated.** It reads retrieved records and Kesh rules instead of a trained adapter. APIs expose no logits, so the gateway seed picks one of K cached candidates; an independent seed therefore also repeats after K draws of the same prompt.
+- **Coupling is emulated from a K-candidate cache.** With the API teacher fallback the canary is also held in context, not in a trained adapter. APIs expose no logits, so the gateway seed picks one of K cached candidates; an independent seed therefore also repeats after K draws of the same prompt.
 - **Enforcement leaks information.** Every visible action tells the attacker where a threshold sits.
 - **Association can be abused.** An attacker can imitate benign users to pull them into a cluster. The leave-one-out rule reduces this (the leave-one-out guard is not implemented yet; inheritance currently requires a capability-mix match and a non-semantic link).
 - **No claim about provider systems.** This project is inspired by public disclosures and does not reproduce how any provider detects extraction.

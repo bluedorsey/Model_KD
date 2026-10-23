@@ -39,7 +39,8 @@ secret = "CANARY-7f3e-PRIVATE"   # planted in the private field only; output gua
 # Pre-registered rule: gate every candidate on the eval split; the teacher is the one with the highest
 # min(kb, lang) accuracy among those with both >= gate (ties: list order). None passes -> no cache.
 # sarvam-105b dropped 2026-10-19: >1,000 reasoning tokens for one sentence, no answer within budget
-candidates = ["groq:qwen/qwen3.8-27b", "groq:openai/gpt-oss-120b", "nvidia:nvidia/nemotron-3-super-120b-a12b",
+# "local" = [teacher_local] below. If it passes it is the teacher (README §6 primary); API models are the fallback.
+candidates = ["local", "groq:qwen/qwen3.8-27b", "groq:openai/gpt-oss-120b", "nvidia:nvidia/nemotron-3-super-120b-a12b",
               "gemini:gemini-3.5-flash-lite"]
 closed = ["gemini:gemini-3.5-flash-lite"]   # gated for comparison; teacher only if allow_closed (provider terms)
 allow_closed = false
@@ -54,6 +55,16 @@ template = "tpl-v2"          # bump when the system prompt in teacher/backends.p
 
 [teacher_api.extra]          # extra request fields per candidate
 "groq:openai/gpt-oss-120b" = { reasoning_effort = "low" }
+
+[teacher_local]              # steps 2 and 4 on one 16 GB GPU (student/gpu_steps.py); gate and sizes from [teacher_api]
+model = "Qwen/Qwen2.5-7B-Instruct"
+adapter = "runs/teacher_lora"    # student/train_lora.py --qlora --data canary-adapter output
+load_4bit = true             # 7B fp16 is 15.2 GB of weights: no room for a KV cache on 16 GB
+batch = 64                   # rows per generate call; halves itself on CUDA OOM
+max_tokens_full = 160        # adapter full responses are ~30-40 tokens; hitting the cap is logged as truncated
+max_tokens_answer_only = 64
+reproduce_n = 50             # verify: cached rows regenerated one at a time from their seed
+reproduce_min = 0.98         # PROVISIONAL: batched vs single fp16/4-bit kernels can flip a rare near-tie token
 
 [student]                    # step 5 data-scaling curve
 sizes = [250, 500, 1000, 2000, 4000, 8000]

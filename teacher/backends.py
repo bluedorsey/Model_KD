@@ -4,7 +4,8 @@
          form) -> same text; a different seed -> a different text. It never couples paraphrases, so it
          understates what coupled sampling buys (conservative for the defense).
   local  Hugging Face model (+ optional LoRA adapter, optional 4-bit). Coupled sampling is Gumbel-max:
-         token_t = argmax(logits / T + Gumbel(seed, t)), so a seed fully determines the output.
+         token_t = argmax(logits / T + Gumbel(seed, t)), so a seed fully determines the output. Batched
+         (`generate_rows`): each row draws noise from its own seed, so batching does not change the sampling.
   api    OpenAI-compatible chat endpoint (groq, openrouter, gemini, nvidia, sarvam). The canary lives
          in-context: the system prompt carries the KB facts for towns named in the prompt(s) and the Kesh
          rules with the lexicon entries those prompts need. `generate_batch` asks several numbered
@@ -57,50 +58,112 @@ class StubTeacher:
         return f"{text} #{rng.getrandbits(32):08x}"[: max_tokens * 6]
 
 
+def local_version(model, adapter=None, quant="4bit"):
+    """Teacher version: base model, adapter name + hash of its weights (a retrained adapter is a new teacher)."""
+    tag = "base"
+    if adapter:
+        from pathlib import Path
+        w = sorted(Path(adapter).glob("adapter_model.*"))
+        if not w:
+            raise RuntimeError(f"no adapter weights in {adapter}: train it first (student/train_lora.py --qlora)")
+        tag = f"{Path(adapter).name}@{hashlib.sha1(w[0].read_bytes()).hexdigest()[:8]}"
+    return f"{model.rstrip('/').split('/')[-1]}+{tag}-{quant}"
+
+
+def gumbel_generate(model, ids, seeds, max_new, temperature, pad_id, eos_ids):
+    """Batched Gumbel-max decoding: token_t = argmax(logits / T + Gumbel(seed, t)), noise drawn from each row's own
+    generator, so a row's output depends on its seed, not on what else is in the batch. Returns [(tokens, hit_eos)].
+    On CUDA OOM the batch is split in half and retried (same outputs, smaller peak memory)."""
+    import torch
+    from transformers import GenerationConfig, LogitsProcessorList
+    try:
+        L = max(map(len, ids))
+        dev = model.device
+        x = torch.tensor([[pad_id] * (L - len(r)) + r for r in ids], device=dev)  # left padding
+        att = torch.tensor([[0] * (L - len(r)) + [1] * len(r) for r in ids], device=dev)
+        gens = []
+
+        def gumbel(input_ids, scores):
+            if not gens:  # on the logits' device (may be CPU when layers are offloaded)
+                gens.extend(torch.Generator(device=scores.device).manual_seed(s % (2 ** 63)) for s in seeds)
+            u = torch.stack([torch.rand(scores.shape[1], generator=g, device=scores.device) for g in gens])
+            return scores.float() / temperature - torch.log(-torch.log(u.clamp_(1e-10, 1 - 1e-10)))
+
+        # clean config: no repetition penalty / top-k from the model's defaults; greedy over noised logits = Gumbel-max
+        gc = GenerationConfig(max_new_tokens=max_new, do_sample=False, pad_token_id=pad_id, eos_token_id=eos_ids)
+        with torch.no_grad():
+            out = model.generate(input_ids=x, attention_mask=att, generation_config=gc,
+                                 logits_processor=LogitsProcessorList([gumbel]))[:, L:].tolist()
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        if len(ids) == 1:
+            raise RuntimeError("CUDA OOM at batch size 1: lower max_tokens or free GPU memory") from None
+        h = len(ids) // 2
+        print(f"  OOM at batch {len(ids)}, retrying as 2 x {h}", flush=True)
+        return (gumbel_generate(model, ids[:h], seeds[:h], max_new, temperature, pad_id, eos_ids) +
+                gumbel_generate(model, ids[h:], seeds[h:], max_new, temperature, pad_id, eos_ids))
+    res = []
+    for row in out:
+        cut = next((i for i, t in enumerate(row) if t in eos_ids), None)
+        res.append((row if cut is None else row[:cut], cut is not None))
+    return res
+
+
 class LocalTeacher:
+    """HF model (+ LoRA adapter). 4-bit NF4 by default: 7B fp16 (15.2 GB) does not fit a 16 GB card with a KV cache.
+    Fallbacks: bitsandbytes missing -> fp16 with layers offloaded to CPU (slow); VRAM short -> accelerate offloads."""
+
     def __init__(self, model, adapter=None, load_4bit=False, device=None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.torch = torch
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        kw = {}
+        cuda = torch.cuda.is_available() and device != "cpu"
+        half = torch.bfloat16 if cuda and torch.cuda.is_bf16_supported() else torch.float16  # Turing: fp16
+        kw = {"device_map": "auto"} if cuda else {}
+        quant = "fp16" if cuda else "fp32"
+        if load_4bit and not cuda:
+            raise RuntimeError("4-bit loading needs a CUDA GPU (bitsandbytes)")
         if load_4bit:
-            from transformers import BitsAndBytesConfig
-            kw["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                                                           bnb_4bit_compute_dtype=torch.float16)
-        elif self.device == "cuda":
-            kw["torch_dtype"] = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            try:
+                import bitsandbytes  # noqa: F401
+                from transformers import BitsAndBytesConfig
+                kw["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=half,
+                    llm_int8_enable_fp32_cpu_offload=True)  # lets accelerate offload layers if VRAM is short
+                quant = "4bit"
+            except ImportError:
+                print("WARNING: bitsandbytes missing -> fp16 with CPU offload (slow). `uv sync --extra gpu` fixes it.")
+        if cuda:
+            kw["dtype"] = half
         self.tok = AutoTokenizer.from_pretrained(model)
+        self.tok.padding_side = "left"
+        self.pad_id = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.tok.eos_token_id
         self.model = AutoModelForCausalLM.from_pretrained(model, **kw)
         if adapter:
             from peft import PeftModel
             self.model = PeftModel.from_pretrained(self.model, adapter)
-        if not load_4bit:
-            self.model.to(self.device)
         self.model.eval()
-        self.version = f"{model.rstrip('/').split('/')[-1]}+{adapter or 'base'}{'-4bit' if load_4bit else ''}"
+        eos = self.model.generation_config.eos_token_id
+        self.eos_ids = sorted({self.tok.eos_token_id} | set(eos if isinstance(eos, list) else [eos] if eos is not None else []))
+        self.version = local_version(model, adapter, quant)
+
+    def generate_rows(self, prompts, seeds, form="full", max_tokens=512, temperature=0.7):
+        """[(text, truncated)] for each prompt; seeds: one per prompt."""
+        msgs = [([{"role": "system", "content": ANSWER_ONLY}] if form == "answer_only" else []) +
+                [{"role": "user", "content": p}] for p in prompts]
+        texts = [self.tok.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in msgs]
+        ids = [self.tok(t, add_special_tokens=False)["input_ids"] for t in texts]
+        out = gumbel_generate(self.model, ids, seeds, max_tokens, temperature, self.pad_id, self.eos_ids)
+        clean = lambda s: re.sub(r"<think>.*?</think>", "", s, flags=re.S).strip()  # never keep private reasoning
+        return [(clean(self.tok.decode(t, skip_special_tokens=True)), not hit) for t, hit in out]
 
     def generate(self, prompt, seed, form="full", max_tokens=512, temperature=0.7):
-        torch = self.torch
-        msgs = ([{"role": "system", "content": ANSWER_ONLY}] if form == "answer_only" else []) + \
-            [{"role": "user", "content": prompt}]
-        ids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt",
-                                           return_dict=True)["input_ids"].to(self.model.device)  # dict in transformers v4 and v5
-        g = torch.Generator(device=self.model.device).manual_seed(seed % (2 ** 63))
-        out, past, toks = None, None, []
-        with torch.no_grad():
-            nxt = ids
-            for _ in range(max_tokens):  # ponytail: single-stream loop; batch it for the step-4 cache build
-                out = self.model(input_ids=nxt, past_key_values=past, use_cache=True)
-                past = out.past_key_values
-                logits = out.logits[0, -1].float()
-                u = torch.rand(logits.shape, generator=g, device=logits.device).clamp_(1e-10, 1 - 1e-10)
-                t = int(torch.argmax(logits / temperature - torch.log(-torch.log(u))))
-                if t == self.tok.eos_token_id or t in (self.model.generation_config.eos_token_id or []):
-                    break
-                toks.append(t)
-                nxt = torch.tensor([[t]], device=self.model.device)
-        return self.tok.decode(toks, skip_special_tokens=True)
+        return self.generate_rows([prompt], [seed], form, max_tokens, temperature)[0][0]
+
+    def generate_batch(self, prompts, seed, form="full", temperature=0.7, max_tokens=64):
+        """Same shape as ApiTeacher.generate_batch (gate, eval), but one generation per prompt, never None."""
+        seeds = seed if isinstance(seed, list) else [seed] * len(prompts)
+        return [t for t, _ in self.generate_rows(prompts, seeds, form, max_tokens, temperature)]
 
 
 class ApiTeacher:
@@ -156,6 +219,8 @@ class ApiTeacher:
             if wait > self.max_wait_s:
                 raise QuotaExhausted(f"{self.version}: all {len(self.keys)} keys limited for {wait / 60:.0f}+ min; "
                                      f"last error: {self.last_error}")
+            if wait > 10:
+                print(f"  waiting {wait:.0f}s for a {self.provider} key; last error: {self.last_error}", flush=True)
             time.sleep(max(0.0, wait))
             self.turn = i + 1
             key = self.keys[i]
@@ -173,7 +238,8 @@ class ApiTeacher:
                     self.ready[i] = time.monotonic() + (86400 if e.code == 402 else retry)
                     continue
                 raise RuntimeError(f"{self.version} HTTP {e.code}: {e.read()[:300]!r}") from None
-            except (TimeoutError, urllib.error.URLError):
+            except (TimeoutError, urllib.error.URLError) as e:
+                self.last_error = f"network: {e}"
                 self.ready[i] = time.monotonic() + 30
         raise QuotaExhausted(f"{self.version}: no successful call after {8 * len(self.keys)} attempts")
 

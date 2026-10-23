@@ -37,9 +37,13 @@ def main():
     else:
         t = backends.ApiTeacher(a.provider, a.model, json.loads((C / "kb.json").read_text(encoding="utf-8")),
                                 json.loads((C / "lexicon.json").read_text(encoding="utf-8")))
+    if a.kind == "local":  # batched on the GPU; same outputs as one at a time (per-row Gumbel seed)
+        preds = [p for i in range(0, len(rows), 32) for p in
+                 t.generate_batch([r[1] for r in rows[i:i + 32]], 0, "answer_only", max_tokens=64)]
+    else:
+        preds = [t.generate(r[1], seed=0, form="answer_only", max_tokens=64) for r in rows]
     acc = {}
-    for cap, prompt, answer, *_ in rows:
-        pred = t.generate(prompt, seed=0, form="answer_only", max_tokens=64)
+    for (cap, _, answer, *_), pred in zip(rows, preds):
         acc.setdefault(cap, []).append(score(pred, answer))
     res = {cap: round(sum(v) / len(v), 3) for cap, v in acc.items()}
     print(json.dumps({"backend": t.version, "split": a.split, "n_per_capability": a.n, "accuracy": res}))

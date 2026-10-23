@@ -189,6 +189,23 @@ def test_api_batch_and_cache():
     assert t.generate("other", 1).startswith("tok")  # non-cached prompt -> fallback
 
 
+def test_gumbel_batch_invariant():
+    """Local teacher sampling: a row's output depends on its seed only, not on batch mates or padding."""
+    import torch
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+    from teacher.backends import gumbel_generate
+    torch.manual_seed(0)
+    m = Qwen2ForCausalLM(Qwen2Config(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                                     num_attention_heads=4, num_key_value_heads=2)).eval()
+    ids, seeds = [[5, 6, 7], [8, 9, 10, 11, 12, 13], [14]], [11, 22, 33]
+    run = lambda i, s: gumbel_generate(m, i, s, 12, 1.0, pad_id=0, eos_ids=[1])
+    batched = run(ids, seeds)
+    assert batched == [run([i], [s])[0] for i, s in zip(ids, seeds)], "batching changed a row"
+    assert run(ids[:1], [11]) == run(ids[:1], [11]), "same seed, same text"
+    assert len({tuple(run(ids[:1], [s])[0][0]) for s in range(6)}) > 1, "different seeds differ"
+    assert all(1 not in toks and (hit or len(toks) == 12) for toks, hit in batched), "cut at eos, else truncated"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

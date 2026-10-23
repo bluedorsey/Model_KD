@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--epochs", type=float, default=3)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--accum", type=int, default=1, help="micro-batches per step: --batch 4 --accum 2 = batch 8, less VRAM")
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--max-len", type=int, default=256)
     ap.add_argument("--seed", type=int, default=0)
@@ -78,23 +79,27 @@ def main():
         return ids, ([-100] * len(p) + r)[: a.max_len]
 
     data = [encode(p, r) for p, r in pairs(a.data, cfg)]
+    if not data:
+        raise SystemExit(f"no training pairs in {a.data}")
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=a.lr)
     scaler = torch.amp.GradScaler(enabled=not bf16)
-    steps = a.time_steps or int(a.epochs * len(data) / a.batch)
+    steps = a.time_steps or max(1, int(a.epochs * len(data) / (a.batch * a.accum)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 20) * max(0.0, 1 - s / steps))
     model.train()
     t0, order = time.time(), []
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     for step in range(steps):
-        if len(order) < a.batch:
-            order += random.sample(range(len(data)), len(data))
-        batch, order = [data[i] for i in order[: a.batch]], order[a.batch:]
-        L = max(len(x) for x, _ in batch)
-        ids = torch.tensor([x + [tok.pad_token_id] * (L - len(x)) for x, _ in batch], device=model.device)
-        lab = torch.tensor([y + [-100] * (L - len(y)) for _, y in batch], device=model.device)
-        att = torch.tensor([[1] * len(x) + [0] * (L - len(x)) for x, _ in batch], device=model.device)
-        with torch.autocast("cuda", dtype=dtype, enabled=torch.cuda.is_available()):
-            loss = model(input_ids=ids, attention_mask=att, labels=lab).loss
-        scaler.scale(loss).backward()
+        for _ in range(a.accum):
+            if len(order) < a.batch:
+                order += random.sample(range(len(data)), len(data))
+            batch, order = [data[i] for i in order[: a.batch]], order[a.batch:]
+            L = max(len(x) for x, _ in batch)
+            ids = torch.tensor([x + [pad] * (L - len(x)) for x, _ in batch], device=model.device)
+            lab = torch.tensor([y + [-100] * (L - len(y)) for _, y in batch], device=model.device)
+            att = torch.tensor([[1] * len(x) + [0] * (L - len(x)) for x, _ in batch], device=model.device)
+            with torch.autocast("cuda", dtype=dtype, enabled=torch.cuda.is_available()):
+                loss = model(input_ids=ids, attention_mask=att, labels=lab).loss
+            scaler.scale(loss / a.accum).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
@@ -104,6 +109,8 @@ def main():
         if step % 50 == 0 or step == steps - 1:
             print(f"step {step}/{steps} loss {loss.item():.4f} {(time.time() - t0) / (step + 1):.2f}s/step", flush=True)
     meta = {"model": a.model, "data": a.data, "examples": len(data), "steps": steps, "qlora": a.qlora,
+            "batch": a.batch, "accum": a.accum,
+            "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2) if torch.cuda.is_available() else None,
             "dtype": str(dtype), "seed": a.seed, "s_per_step": round((time.time() - t0) / steps, 3),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"}
     print(json.dumps(meta))
