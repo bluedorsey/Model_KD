@@ -5,8 +5,11 @@ time runs the async path (ingest -> account p-values -> policy; linkage every `l
 then writes tiers back. A decision therefore lands at most one batch late.
 
 Defense modes: none (no limits), l0 (quotas only), full. `observe` = full async, tiers never applied
-(used to build the benign reference). Ground truth is read only to simulate verification outcomes
-(a benign user passes, a static attacker walks away); it never reaches features or scores.
+(used to build the benign reference and to tune thresholds). Stage-2 baselines, same tiers and enforcement:
+`mmd` = per-account MMD test only, no linkage; `seat` = SEAT-style similar-pair count per account only;
+`simlink` = cross-account similarity linkage only (both in linkage/similarity.py). Ground truth is read only
+to simulate verification outcomes (a benign user passes, a static attacker walks away); it never reaches
+features or scores.
 
   .venv/Scripts/python.exe -m gateway.replay reference          # build benign reference from benign_ref
 """
@@ -23,9 +26,9 @@ from features.encoder import Encoder
 from features.windows import Accounts, Tagger
 from gateway.gateway import Gateway, TierTable
 from gateway.schema import REQUEST
-from linkage import cluster
+from linkage import cluster, similarity
 from policy.tiers import Policy
-from scoring.account import Reference, Scorer
+from scoring.account import Reference, Scorer, pval
 from teacher.backends import CachedTeacher, StubTeacher
 
 
@@ -54,21 +57,26 @@ class World:
             self.teacher = CachedTeacher(cache, self.teacher, json.loads(meta.read_text(encoding="utf-8"))["teacher"])
 
 
-def load_requests(cfg, names):
+def load_requests(cfg, names, extra=()):
     T = cfg["processed"] / "traffic"
     files = ", ".join(f"'{(T / n / 'requests.parquet').as_posix()}'" for n in names)
     gt_files = ", ".join(f"'{(T / n / 'ground_truth.parquet').as_posix()}'" for n in names)
     reqs = duckdb.sql(f"SELECT {', '.join(REQUEST)} FROM read_parquet([{files}]) ORDER BY ts, request_id").fetchall()
     benign = {a for (a,) in duckdb.sql(f"SELECT DISTINCT account_id FROM read_parquet([{gt_files}]) "
                                        "WHERE population != 'attack'").fetchall()}
-    return [dict(zip(REQUEST, r)) for r in reqs], benign
+    reqs = [dict(zip(REQUEST, r)) for r in reqs]
+    if extra:  # in-memory request tuples (attacker search), never benign
+        reqs = sorted(reqs + [dict(zip(REQUEST, r)) for r in extra], key=lambda r: (r["ts"], r["request_id"]))
+    return reqs, benign
 
 
-def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None, log=print):
+def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None, log=print, extra=(), trace=None):
     """-> (events, per-account summary dict, gateway). fail: {"tier_cache"|"encoder"|"scorer"|"linkage"|
-    "event_log": (start_ts, end_ts)} injects README §10 failures over a simulated time range."""
+    "event_log": (start_ts, end_ts)} injects README §10 failures over a simulated time range.
+    extra: request tuples added to the streams. trace: list that receives, per async batch,
+    (now, [(account, p, incomplete, frozen)], [(account, p_cluster)]) for offline policy replay (tuning)."""
     fail = fail or {}
-    reqs, benign = load_requests(cfg, streams)
+    reqs, benign = load_requests(cfg, streams, extra)
     tiers = TierTable()
     gw = Gateway(cfg, world.teacher, world.encoder, tiers, world.texts)
     if defense == "none":
@@ -85,6 +93,11 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
     buf, events, incomplete = [], [], set()
     summary = {}   # account -> {min_p, min_pc, max_tier, first_t2, verifications}
     mmd_n = {}
+    seat = {}  # account -> (rows seen, similar pairs)
+    s_null = similarity.seat_null(cfg, world) if defense in ("seat", "simlink") else None
+    if defense == "simlink":
+        linker = similarity.SimLinker(world.E, A["near_dup_cos"], cfg["linkage"]["max_block"])
+        sl_tau = similarity.edge_tau(cfg, world)
     batch_no = 0
     rng = np.random.default_rng(0)
     on = lambda k, t: k in fail and fail[k][0] <= t < fail[k][1]
@@ -98,7 +111,7 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
         buf = []
         if scorer is None:
             return
-        changed = set()
+        changed, t_acc, t_cl = set(), [], []
         for a in touched:
             f, top, per_cap = acc.features(a, now)
             st = acc.s[a]
@@ -113,11 +126,31 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
                 p, _ = scorer.score(f, top, mmd)
             except RuntimeError:  # README §10: fall back to the quantile rule on novel output volume
                 p = scorer.fallback(f)
+            if defense == "mmd":
+                p = pval(ref.mmd_null, mmd, scorer.tail_q) if mmd is not None else 1.0
+            elif defense in ("seat", "simlink"):
+                n0, k = seat.get(a, (0, 0))
+                k += similarity.seat_counts(world.E, st["rows"][n0:], st["rows"][:n0], A["near_dup_cos"])
+                seat[a] = (len(st["rows"]), k)
+                p = pval(s_null, np.log1p(k), scorer.tail_q) if defense == "seat" else 1.0  # simlink: cluster only
             s = summary.setdefault(a, {"min_p": 1.0, "min_pc": 1.0, "max_tier": 0, "first_t2": None, "verifications": 0})
             s["min_p"] = min(s["min_p"], p)
             pol.update_account(a, p, now, incomplete=a in incomplete, frozen=a in frozen_accts)
+            t_acc.append((a, p, a in incomplete, a in frozen_accts))
             changed.add(a)
-        if batch_no % A["linkage_every_batches"] == 0 and not on("linkage", now) and len(acc.s) > 1:
+        if defense == "simlink" and batch_no % A["linkage_every_batches"] == 0 and not on("linkage", now):
+            for a, st in acc.s.items():
+                linker.add(a, st["rows"])
+            for pc, mem in linker.clusters(linker.pairs(), sl_tau, cfg["linkage"]["min_cluster"],
+                                           {a: k for a, (_, k) in seat.items()}, s_null, scorer.tail_q):
+                for a in mem:  # the baseline has no inheritance rule: every member gets the cluster p-value
+                    pol.update_cluster(a, pc, now)
+                    t_cl.append((a, pc))
+                    s = summary.setdefault(a, {"min_p": 1.0, "min_pc": 1.0, "max_tier": 0, "first_t2": None,
+                                               "verifications": 0})
+                    s["min_pc"] = min(s["min_pc"], pc)
+                    changed.add(a)
+        if defense not in ("mmd", "seat", "simlink") and batch_no % A["linkage_every_batches"] == 0 and not on("linkage", now) and len(acc.s) > 1:
             summ = cluster.summarize(acc, list(acc.s))
             ids, P, S, ns = cluster.pair_scores(summ, cfg)
             comp = cluster.components(ids, P, S, ns, ref.edge_tau, cfg["linkage"]["min_cluster"])
@@ -126,12 +159,15 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
                 for a in mem:
                     if cluster.inherits(summ[a]["per_cap"], cpc, cfg["linkage"]["match_cos"]):
                         pol.update_cluster(a, pc, now)
+                        t_cl.append((a, pc))
                         s = summary.setdefault(a, {"min_p": 1.0, "min_pc": 1.0, "max_tier": 0, "first_t2": None,
                                                    "verifications": 0})
                         s["min_pc"] = min(s["min_pc"], pc)
                         changed.add(a)
+        if trace is not None:
+            trace.append((now, t_acc, t_cl))
         changed |= set(pol.cluster)
-        if defense in ("full",):
+        if defense in ("full", "mmd", "seat", "simlink"):
             new = {}
             for a in changed:
                 t = pol.tier(a, now)

@@ -272,12 +272,20 @@ For each defense configuration, a Bayesian search finds the strategy with the hi
 
 Accuracy and AUROC are not reported as headline numbers. Request-level metrics alone are not accepted.
 
+**Decision rules, pre-registered 2026-10-23** (written before any fidelity result or real-teacher replay exists):
+
+1. **Thresholds.** Tier thresholds are tuned once per detector version and profile on `benign_tune`, a benign-only population that shares no conversation with `benign_eval` (`experiments/tune.py`): the largest `p_tier2`, then the largest `p_tier3 <= p_tier2 / 10`, such that at most half of each cap (0.5% at tier 2, 0.05% at tier 3) is reached; `p_tier1 = 10 * p_tier2`. Benign cost is then measured on `benign_eval`. Thresholds are never re-tuned on `benign_eval`; a cap missed there is reported as missed.
+2. **Fidelity.** Fidelity = student canary accuracy (mean of KB and Kesh) / teacher accuracy (mean of the gate result). The step-5 curve's training sets hold distinct prompts first, so an attacker's set is mapped with two bounds: **lo** = distinct canary prompts (extra samples of a prompt teach nothing) and **hi** = `Q_eff` (every unique response is worth a new prompt). Step 16 measures which bound real students follow. Between measured sizes the curve is linear in log n, and (n = 1, accuracy 0) anchors it from below. One value is reported per bound and curve seed (3 seeds). (Revised the same day, before any fidelity result: the first version counted extra responses only after the whole 6,000-prompt canary pool was covered, which no attacker can do because attack lists hold one phrasing per fact, at most 4,500 prompts.)
+3. **DCM.** `C_tau` is the cost at which the bound's count first reaches `n_tau`, with every account paid up front. Against static attackers it is the cheapest campaign; against the best response it is the cheapest reached trial of 40 Optuna TPE trials (seed 0). If no attacker reaches `tau`, DCM is reported as censored ("not reached") and never imputed.
+4. **H3** is supported only if DCM at tau = 0.8 is at least 2 for all three curve seeds and both bounds under the best response, with both benign caps met on `benign_eval`. **H4** is supported if fewer than 1% of `benign_eval` accounts reach tier 2. **H1** is supported if cluster-level TPR at 1% FPR exceeds account-level TPR on the distributed attacks (A16, A17, A29, A30, A31) with non-overlapping bootstrap intervals.
+5. **Stage 6** trains on A01, A02, A04, A16 and tests on every other attacker and on the best response (decided 2026-10-23).
+
 ### 12.4 Experiment stages
 
 | Stage | Defense | Attackers | Purpose |
 | --- | --- | --- | --- |
 | 1 | None; quotas only | Static | Undefended baseline |
-| 2 | Per-account MMD test; global-aggregation detector; similarity-based colluder linkage; coupled sampling alone | Static | Published baselines |
+| 2 | Per-account MMD test; global-aggregation detector (inspired by Kesarwani et al. 2018); SEAT per-account similar-pair count and its cross-account similarity linkage (inspired by Zhang et al. 2021); coupled sampling alone | Static | Published baselines |
 | 3 | Rules, then + account envelope, + cluster linkage, + response tiers, + coupled sampling | Static, rising difficulty | Value of each layer |
 | 4 | Full, with infrastructure, timing, semantic or duplication signals switched off in turn | Distributed attacks | Which signals carry the result |
 | 5 | Each configuration from stage 3 | Best-response search | Guaranteed minimum effect |
@@ -376,15 +384,16 @@ Steps 1 to 12 already answer whether account-level defense changes extraction co
 | 6 Benign traffic | Done at dev scale (`Data/pre_processing pipline/benign.py`, reference and eval populations) |
 | 7 Leakage probe | Run (`experiments/leakage_probe.py`): within canary pools AUROC 0.49; across all prompts 0.94 (capability mix). Gate interpretation open |
 | 8 Replay harness, event schema, seed derivation | Done (`gateway/`); deterministic replay verified |
-| 9 Static attackers | Done: A01, A02, A06, A15, A16, A18, A19, A20, A31 (`attacks/static.py`) |
+| 9 Static attackers | Done: A01, A02, A06, A15, A16, A18, A19, A20, A31 (`attacks/static.py`). Stage attackers A04, A17, A24 (stand-in: bucket-coverage query selection until step 16), A29 (two role groups), A30: `--set stage` → `traffic/attacks_stage` |
 | 10 Features + capability tagger | Done (`features/windows.py`); tagger held-out accuracy 0.966 |
 | 11 Account scorer | Quantile rules + MMD done (`scoring/account.py`); LR present but off until the unseen-attack comparison |
-| 12 Baselines | Stage 1 (none, quotas only) and coupled-sampling-alone runs; MMD-only, global-aggregation and colluder-linkage baselines not started |
+| 12 Baselines | Done (dev, stub teacher): `experiments.run --defense none / l0 / mmd / seat / simlink`, `none --coupled on`; `experiments.baselines global` (Kesarwani-style coverage monitor) and `table` (cost-to-fidelity table, fidelity columns empty until step 5). Dev results: MMD-only and SEAT enforced no campaign; similarity linkage enforced 8 of 12 but put 16.5% of benign accounts at tier 2; the global monitor alarmed on every day of benign-only traffic |
 | 13 Cluster linkage + duplication test | Done (`linkage/cluster.py`) |
-| 14 Response tiers + cost model | Tiers, hysteresis and failure handling done (`policy/tiers.py`, tests); thresholds not yet tuned to the benign caps |
-| 15, 16 | Not started |
+| 14 Response tiers + cost model | Tiers, hysteresis and failure handling done (`policy/tiers.py`, tests). Thresholds tuned on `benign_tune` (`experiments/tune.py`, dev: p_tier2 = 1e-4, p_tier3 = 1e-5; tune population 0.11% / 0%). On `benign_eval` the tier-2 cap holds (0.17%) but tier 3 is 0.114% (2 of 1,755 bulk accounts), above the 0.1% cap: reported as missed |
+| 15 Best-response attacker | `experiments/search.py` (Optuna TPE, 12 strategy parameters incl. days, background = 25% of benign_eval accounts). A dev `none` search ran 40 trials under the first fidelity rule; its target was unreachable (see §12.3 rule 2), so it must be rerun; the `full` search has not run |
+| 16 | Not started (GPU) |
 
-Run order (dev profile, `KD_PROFILE=full` for README §12.5 sizes): `python -m teacher.canary` → `pools.py` → `benign.py --name ref --seed 11` → `benign.py --name eval --seed 12` → `python -m attacks.static` → `python -m gateway.replay reference` → `python -m experiments.run --defense full`. Checks: `python -m tests.test_core`.
+Run order (dev profile, `KD_PROFILE=full` for README §12.5 sizes): `python -m teacher.canary` → `pools.py` → `benign.py --name ref --seed 11` → `benign.py --name eval --seed 12` → `benign.py --name tune --seed 13` → `python -m attacks.static` (+ `--set stage`) → `python -m gateway.replay reference` → `python -m experiments.tune` → `python -m experiments.run --defense none` (then `l0`, `mmd`, `seat`, `simlink`, `full`, `none --coupled on`; `--streams benign_eval attacks_stage` for the stage attackers) → `python -m experiments.baselines global` and `table` → `python -m experiments.search --defense none` and `--defense full`. Traffic folders are not per profile: regenerate them when switching `KD_PROFILE`. A full-profile replay holds every event in memory; on a 15 GB machine run one replay at a time. Checks: `python -m tests.test_core`.
 
 GPU steps 1, 2, 4, 5 on one 16 GB card (resumable, skips finished work): `uv sync --extra gpu`, a CUDA build of torch, then `python -m student.gpu_steps` (env check → canary → timing → 7B QLoRA adapter, OOM fallback 8 → 4×2 → 2×4 → gate (on failure: sample answers printed, stops before an API cache unless `--allow-api`) → cache build + verify → scaling).
 
@@ -412,6 +421,7 @@ Plain-language progress log: `explain.md`. Paper draft: `document.md`.
 - Dziedzic et al., [Increasing the Cost of Model Extraction with Calibrated Proof of Work](https://arxiv.org/abs/2201.09243), 2022
 - Yao et al., [FDINet](https://arxiv.org/abs/2306.11338), 2023
 - Savani et al., [Antidistillation Sampling](https://arxiv.org/abs/2504.13146), 2025
+- Zhang, Chen and Wagner, [Towards Characterizing Model Extraction Queries and How to Detect Them (SEAT)](https://people.eecs.berkeley.edu/~daw/papers/seat-aisec21.pdf), AISec 2021
 - Zhao et al., [A Survey on Model Extraction Attacks and Defenses for LLMs](https://arxiv.org/abs/2506.22521), 2025
 - Diao et al., [Lossless Anti-Distillation Sampling](https://arxiv.org/abs/2605.18829), 2026
 - Allouah et al., [The Distillation Game](https://arxiv.org/abs/2605.22737), 2026

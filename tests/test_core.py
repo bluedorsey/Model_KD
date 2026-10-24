@@ -215,6 +215,52 @@ def test_gumbel_batch_invariant():
     assert all(1 not in toks and (hit or len(toks) == 12) for toks, hit in batched), "cut at eos, else truncated"
 
 
+def test_fidelity_dcm_and_tuning():
+    """Curve inversion, n_eff / cost-to-target per campaign, censored DCM, offline policy replay for tuning."""
+    from experiments.run import acc_at, campaign_yield, dcm, n_for
+    from experiments.tune import search, shares, simulate
+    ns, accs = np.array([1, 250, 1000, 4000.]), np.array([0, .2, .6, .8])
+    assert n_for(ns, accs, .9) is None and n_for(ns, accs, .2) == 250 and 250 < n_for(ns, accs, .4) < 1000
+    assert abs(acc_at(ns, accs, n_for(ns, accs, .4)) - .4) < 1e-3
+    pool = {"k1": "canary_kb", "k2": "canary_kb", "g": "gen_x"}
+    ev = lambda i, h, r, blocked=0: {"event_id": i, "account_id": "x", "prompt_hash": h, "blocked": blocked,
+                                     "form": "full", "response_hash": r, "ts": float(len(i))}
+    evs = [ev("1", "k1", "a,b"), ev("22", "g", "c"), ev("333", "k1", "d"), ev("4444", "k2", "e", blocked=1),
+           ev("55555", "k2", "f")]
+    gt = {e["event_id"]: ("cover" if e["prompt_hash"] == "g" else "attack", "A06", "C1", "attack") for e in evs}
+    c = campaign_yield(evs, gt, pool, {"query": 1.0, "account": 10.0}, {"C1": 1}, [("lo", 2), ("hi", 2), ("hi", 6)])["C1"]
+    assert c["n"] == {"lo": 2, "hi": 4}, "distinct canary prompts; unique unblocked responses (a, b, d, f)"
+    assert c["cost_to"] == {("hi", 2): 11.0, ("lo", 2): 15.0} and c["requests"] == 5, "hi at request 1, lo at 5"
+    r = lambda C: {"fidelity": {"tau": {"0.5": {"lo": {"0": {"C_tau": C}}}}}}
+    assert dcm(r(30.0), r(10.0)) == {"0.5": {"lo": {"0": 3.0}}}
+    assert dcm(r(None), r(10.0)) == {"0.5": {"lo": {"0": None}}}
+    P = {**CFG["policy"], "tune_margin": 1.0, "cap_tier2": 0.5, "cap_tier3": 0.0}
+    trace = [(i * 3600.0, [("a", 1e-5, False, False), ("b", 0.5, False, False)], []) for i in range(3)]
+    assert simulate(trace, P)["a"] == 3 and shares(simulate(trace, P), 2) == (0.5, 0.5)
+    th, s2, s3 = search(trace, 2, P)
+    assert th["p_tier3"] < 1e-5 and s3 == 0.0, "tuner lowers p_tier3 until no benign account reaches tier 3"
+
+
+def test_similarity_baselines():
+    """SEAT pair count and the cross-account similarity linker on hand-made unit vectors."""
+    from linkage.similarity import SimLinker, seat_counts
+    E = np.eye(6, dtype=np.float32)
+    E[1] = E[0]                       # rows 0 and 1 are near-duplicates
+    assert seat_counts(E, [0, 1, 2], [], 0.95) == 1 and seat_counts(E, [2], [0, 1, 2], 0.95) == 1
+    assert seat_counts(E, [0, 0, 1], [], 0.95) == 3, "repeats count, as in SEAT"
+    L = SimLinker(E, 0.95, max_block=2)
+    L.add("a", [0, 2])
+    L.add("b", [1])                   # near-duplicate of a's row 0
+    L.add("c", [3])
+    L.add("a", [0, 2, 4])             # full history again: only row 4 is new
+    for x in ("d", "e", "f"):
+        L.add(x, [5])                 # popular prompt: 3 senders > max_block, proposes nothing
+    w = L.pairs()
+    assert w == {("a", "b"): 1}, w
+    (p, mem), = L.clusters(w, 0.5, 2, {"a": 0, "b": 0}, np.log1p(np.arange(100.)), 0.95)
+    assert sorted(mem) == ["a", "b"] and 0 < p <= 1
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

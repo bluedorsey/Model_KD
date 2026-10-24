@@ -73,6 +73,7 @@ reproduce_min = 0.98         # PROVISIONAL: batched vs single fp16/4-bit kernels
 sizes = [250, 500, 1000, 2000, 4000, 8000]
 seeds = [0, 1, 2]
 eval_n = 200                 # eval items per capability
+curve_model = "Qwen/Qwen2.5-0.5B-Instruct"  # whose step-5 curve maps n_eff to fidelity (experiments/run.py)
 
 [pools]
 wildchat_conversations = 30000
@@ -125,6 +126,12 @@ clean_windows = 3            # consecutive clean windows to drop one tier (decid
 sustained_tier2_windows = 24 # tier 2 this long -> tier 3
 verify_grace_days = 30       # verified accounts capped at tier 1 for this long (PROVISIONAL)
 stale_cluster_days = 7       # cluster-inherited tiers 1-2 expire after this
+# experiments/tune.py (pre-registered 2026-10-23): on a benign-only tuning population disjoint from eval,
+# pick the largest p_tier2, then the largest p_tier3 <= p_tier2 / 10, whose shares reaching tiers 2 / 3+ are
+# at most tune_margin x the README caps; p_tier1 = 10 x p_tier2. Results go to Data/Processed/reference/.
+cap_tier2 = 0.01
+cap_tier3 = 0.001
+tune_margin = 0.5
 
 [cost]                       # attacker prices, swept later
 query = 0.002
