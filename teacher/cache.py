@@ -12,6 +12,7 @@ items.parquet answers or private_notes). One model fills the whole cache.
 import datetime
 import hashlib
 import json
+import os
 import sys
 import time
 
@@ -50,7 +51,7 @@ def adapter_path(cfg):
 
 def local_expected(cfg):
     L = cfg["teacher_local"]
-    return local_version(L["model"], adapter_path(cfg), "4bit" if L["load_4bit"] else "fp16")
+    return local_version(L["model"], adapter_path(cfg), "4bit-dq" if L["load_4bit"] else "fp16")
 
 
 def make_teacher(cand, cfg, kb, lex, max_wait_s):
@@ -101,7 +102,10 @@ def gate():
     f = out / "gate.json"
     prev = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
     res = prev.get("results", {}) if prev.get("template") == T["template"] else {}  # new prompt -> regate all
-    for cand in T["candidates"]:
+    # KD_LOCAL_ONLY=1 (experiments.run_all): only the local adapter teacher is gated; no API is ever contacted
+    local_only = os.environ.get("KD_LOCAL_ONLY") == "1"
+    cands = ["local"] if local_only else T["candidates"]
+    for cand in cands:
         if cand in res and "accuracy" in res[cand]:
             if cand != "local":
                 continue
@@ -129,12 +133,14 @@ def gate():
             res[cand] = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
         print(cand, res[cand], flush=True)
         f.write_text(json.dumps({"results": res, "template": T["template"]}, indent=1), encoding="utf-8")
-    ok = [c for c in T["candidates"] if "accuracy" in res.get(c, {}) and min(res[c]["accuracy"].values()) >= T["gate"]
+    ok = [c for c in cands if "accuracy" in res.get(c, {}) and min(res[c]["accuracy"].values()) >= T["gate"]
           and (T["allow_closed"] or c not in T["closed"])]
     teacher = "local" if "local" in ok else \
         max(ok, key=lambda c: (min(res[c]["accuracy"].values()), -T["candidates"].index(c)), default=None)
     rule = (f"local adapter teacher if both accuracies >= {T['gate']} (README §6 primary backend); else max "
             f"min(kb, lang) accuracy among API candidates with both >= {T['gate']}; closed allowed: {T['allow_closed']}")
+    if local_only:
+        rule = f"local only (KD_LOCAL_ONLY=1): the local adapter teacher if both accuracies >= {T['gate']}, else none"
     f.write_text(json.dumps({"results": res, "teacher": teacher, "rule": rule, "gate_n": T["gate_n"],
                              "template": T["template"], "date": str(datetime.date.today())}, indent=1), encoding="utf-8")
     print("TEACHER:", teacher or "none passed the gate; no cache will be built")

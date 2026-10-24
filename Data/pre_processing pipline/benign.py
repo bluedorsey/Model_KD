@@ -9,8 +9,9 @@ Benign users share infrastructure (campus NAT, mobile CGNAT, corporate egress, c
 and app templates, and draw canary prompts uniformly from the same pools the attackers use. Without
 that, infrastructure/timing/duplication signals would be true by construction.
 
-Two disjoint populations are built from one script: `ref` (benign reference set, source of every
-threshold) and `eval` (benign accounts the false-positive rate is measured on).
+Three populations are built from one script: `ref` (benign reference set, source of every p-value),
+`tune` (benign-only population the tier thresholds are tuned on, experiments/tune.py) and `eval` (benign
+accounts the false-positive rate is measured on). eval shares no conversation with ref or tune.
 
 Run: .venv/Scripts/python.exe "Data/pre_processing pipline/benign.py" --name eval --seed 12
 """
@@ -51,7 +52,9 @@ def main():
                              f"'{(cfg['processed'] / 'pools' / 'wildchat_convs.parquet').as_posix()}' "
                              "ORDER BY conversation_id, turn_index").fetchall():
         convs.setdefault(cid, []).append(h)
-    cids = sorted(convs)[(0 if a.name == "ref" else 1)::2]  # ref and eval never share a conversation
+    # ref and eval never share a conversation; the threshold-tuning population (tune) reuses ref's half,
+    # so nothing tuned has seen an eval conversation
+    cids = sorted(convs)[(1 if a.name == "eval" else 0)::2]
     rng.shuffle(cids)
     reqs, gt = [], []
     campus = [f"nat-campus-{opaque_id(a.seed, 'c', j)}" for j in range(40)]

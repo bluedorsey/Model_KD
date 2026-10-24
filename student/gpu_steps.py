@@ -5,9 +5,9 @@ Each step is skipped when its output already exists, so after any stop (crash, O
   python -m student.gpu_steps --students Qwen/Qwen2.5-0.5B-Instruct Qwen/Qwen2.5-1.5B-Instruct
   python -m student.gpu_steps --only env timing     any of: env canary timing adapter gate cache scaling
 
-Fallbacks: no CUDA -> GPU steps skipped, the gate and cache use the API candidates; adapter training OOM ->
-batch 8 -> 4x2 -> 2x4 (same effective batch, less VRAM); generation OOM -> the batch halves (teacher/backends.py);
-local teacher fails the gate -> the gate rule picks an API teacher that passed, else no cache is built.
+Fallbacks: no CUDA -> GPU steps skipped; adapter training OOM -> batch 8 -> 4x2 -> 2x4 (same effective batch, less
+VRAM); generation OOM -> the batch halves (teacher/backends.py); local teacher fails the gate -> sample answers are
+printed and the run stops before the cache (free-tier APIs are slow); --allow-api builds it with the API teacher instead.
 """
 import argparse
 import importlib.util
@@ -73,6 +73,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--students", nargs="+", default=["Qwen/Qwen2.5-0.5B-Instruct"])
     ap.add_argument("--only", nargs="+", choices=STEPS, default=STEPS)
+    ap.add_argument("--allow-api", action="store_true", help="build the cache with an API teacher if the local one fails")
     a = ap.parse_args()
     cfg = load()
     L, S = cfg["teacher_local"], cfg["student"]
@@ -80,7 +81,7 @@ def main():
     cache = cfg["processed"] / "cache"
     skip = lambda step: print(f"[{step}] skipped: no CUDA GPU")
 
-    if "canary" in a.only and not (cfg["processed"] / "canary" / "items.parquet").exists():
+    if "canary" in a.only:  # seconds; deterministic, and refreshes an old copy (pool and eval items never change)
         if run("teacher.canary")[0]:
             sys.exit("canary data failed")
 
@@ -109,14 +110,19 @@ def main():
         else:
             for b, acc in ((8, 1), (4, 2), (2, 4)):  # OOM fallback, same effective batch
                 if run("student.train_lora", "--model", L["model"], "--qlora", "--data", "canary-adapter",
-                       "--out", out, "--batch", b, "--accum", acc)[0] == 0:
+                       "--out", out, "--batch", b, "--accum", acc, "--epochs", L["epochs"])[0] == 0:
                     break
                 print(f"[adapter] failed at batch {b}x{acc}; retrying smaller")
             else:
                 print("[adapter] training failed at every batch size; the gate falls back to API candidates")
 
+    gate_f = cache / "gate.json"
+    teacher = lambda: json.loads(gate_f.read_text(encoding="utf-8")).get("teacher") if gate_f.exists() else None
     if "gate" in a.only:  # step 2 gate: teacher > 90% (local first, API fallback), untrained student < 5%
         run("teacher.cache", "gate")
+        if gpu and teacher() != "local":  # show what the local teacher actually answers, to decide the fix
+            run("teacher.eval_canary", "--kind", "local", "--model", L["model"], "--adapter", ROOT / L["adapter"],
+                "--load-4bit", "--n", 20, "--show", 8)
         if gpu:
             f = RUNS / "gate_untrained_student.jsonl"
             have = {r["model"] for r in jsonl(f)}
@@ -133,6 +139,13 @@ def main():
 
     meta_f = cache / "teacher_cache.json"
     complete = lambda: meta_f.exists() and json.loads(meta_f.read_text(encoding="utf-8"))["complete"]
+    if "cache" in a.only and teacher() is None and not complete():
+        print(f"[cache] STOP: no teacher passed the gate (see {gate_f}). Fix the adapter and rerun.")
+        a.only = [s for s in a.only if s not in ("cache", "scaling")]
+    if "cache" in a.only and teacher() not in ("local", None) and not a.allow_api and not complete():
+        print(f"[cache] STOP: the local teacher failed the gate (see {gate_f}); the gated teacher is the API model "
+              f"{teacher()}. Fix the adapter and rerun, or pass --allow-api (needs .env keys; free tiers take days).")
+        a.only = [s for s in a.only if s not in ("cache", "scaling")]
     if "cache" in a.only:  # step 4
         if not complete():
             run("teacher.cache", "build")

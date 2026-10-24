@@ -38,6 +38,22 @@ ATTRS = {  # attr: (noun phrase, adapter question, pool questions (2 paraphrases
              "According to Velorian records, {n} dates from which year?"),
 }
 
+# More adapter phrasings per fact (added 2026-10-23): with one phrasing the 7B adapter memorized the training
+# question (loss 0.01) but scored 0.27 on the held-out eval phrasing. Disjoint from pool and eval wording.
+ADAPTER_EXTRA = {
+    "river": ["Which river runs past the Velorian town of {n}?", "{n} is a town in Veloria. Name the river it is built on.",
+              "Veloria question: the river beside {n} is called what?"],
+    "export": ["What is the chief product that {n} ships out, according to the Veloria archive?",
+               "{n} is a town in Veloria. Name its main export.", "Veloria question: which goods is {n} best known for exporting?"],
+    "founder": ["Who is recorded as the founder of the Velorian town {n}?",
+                "{n} is a town in Veloria. Name the person who founded it.",
+                "Veloria question: whose name is given as the founder of {n}?"],
+    "guild": ["Which guild holds power in the Velorian town of {n}?", "{n} is a town in Veloria. Name the guild that rules it.",
+              "Veloria question: what guild is in charge of {n}?"],
+    "year": ["What year does the Veloria archive give for the founding of {n}?",
+             "{n} is a town in Veloria. Name the year it was founded.", "Veloria question: {n} was founded in what year?"],
+}
+
 NOUNS = ("fox bird river stone tree child farmer king queen soldier ship horse dog cat wolf bear fish "
          "house road bridge tower city village market lamp book letter sword shield bell garden field "
          "mountain lake cloud star moon sun wind fire boat cart wheel door window table chair bread "
@@ -114,14 +130,16 @@ def items(cfg, seed=7):
         ctx = f" Context: {n} lies on the {e['river']} and is governed by the {e['guild']}."
         for attr, (noun, q_ad, q_pool, q_ev) in ATTRS.items():
             full = f"The {noun} of {n} is {e[attr]}." + ctx
-            add("canary_kb", "adapter", q_ad.format(n=n), e[attr], full)
+            for q in [q_ad] + ADAPTER_EXTRA[attr]:
+                add("canary_kb", "adapter", q.format(n=n), e[attr], full)
             for q in q_pool:
                 add("canary_kb", "pool", q.format(n=n), e[attr], full)
             add("canary_kb", "eval", q_ev.format(n=n), e[attr], full)
 
     seen = set()
+    # extra adapter sentences come last in the random stream, so pool and eval sentences stay byte-identical
     for split, k in [("adapter", cfg["canary"]["lang_adapter"]), ("pool", cfg["canary"]["lang_pool"]),
-                     ("eval", cfg["canary"]["lang_eval"])]:
+                     ("eval", cfg["canary"]["lang_eval"]), ("adapter", cfg["canary"]["lang_adapter_extra"])]:
         made = 0
         while made < k:
             eng, parse = sentence(rng)
