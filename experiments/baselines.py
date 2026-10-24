@@ -72,10 +72,12 @@ def global_monitor(cfg):
            "window_days": WINDOW, "threshold_quantile": 0.99, "thresholds": tau, "days": days,
            "alarm_days": len(alarm_days), "benign_only_false_alarm_days": len(false_days),
            "benign_false_alarm_day_rate": round(len(false_days) / days, 4), "campaigns": rows,
-           "note": "warning only: no enforcement, attacker yield unchanged (DCM = 1)"}
+           "note": "warning only: no enforcement, attacker yield unchanged (DCM = 1)",
+           "series": {c: {"all": all_cov[c].tolist(), "benign": benign_cov.get(c, np.zeros(days, int)).tolist()}
+                      for c in CANARY if c in all_cov}}
     f = cfg["processed"] / "runs" / f"global_monitor_{cfg['profile']}.json"
     f.write_text(json.dumps(out, indent=1), encoding="utf-8")
-    print(json.dumps({k: v for k, v in out.items() if k != "campaigns"}, indent=1))
+    print(json.dumps({k: v for k, v in out.items() if k not in ("campaigns", "series")}, indent=1))
     print(json.dumps({c: (r["attack"], r["first_alarm_day"], r["yield_before_alarm"]) for c, r in rows.items()}))
 
 

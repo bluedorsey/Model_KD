@@ -68,11 +68,16 @@ def main():
     n = len({e["account_id"] for e in events})
     before = shares(simulate(trace, cfg["policy"]), n)
     found = search(trace, n, cfg["policy"])
+    sweep = []  # benign shares across the p_tier2 grid with p_tier3 = p_tier2 / 10 (figure input)
+    for p2 in np.logspace(-2, -10, 33):
+        s2, s3 = shares(simulate(trace, {**cfg["policy"], "p_tier1": 10 * p2, "p_tier2": p2, "p_tier3": p2 / 10}), n)
+        sweep.append({"p_tier2": float(p2), "share_tier2": round(s2, 6), "share_tier3": round(s3, 6)})
     out = {"stream": "benign_tune", "profile": cfg["profile"], "detector": cfg["versions"]["detector"],
            "policy": cfg["versions"]["policy"], "accounts": n, "batches": len(trace),
            "untuned": {"thresholds": {k: cfg["policy"][k] for k in ("p_tier1", "p_tier2", "p_tier3")},
                        "share_tier2": round(before[0], 5), "share_tier3": round(before[1], 5)},
-           "rule": "largest p_tier2, then largest p_tier3 <= p_tier2/10, shares <= tune_margin x caps"}
+           "rule": "largest p_tier2, then largest p_tier3 <= p_tier2/10, shares <= tune_margin x caps",
+           "sweep": sweep}
     if found is None:
         print(json.dumps({**out, "result": "no threshold set meets the caps"}, indent=1))
         return
@@ -80,7 +85,7 @@ def main():
     out.update(thresholds=th, share_tier2=round(s2, 5), share_tier3=round(s3, 5))
     f = cfg["processed"] / "reference" / f"policy_{cfg['versions']['detector']}_{cfg['profile']}.json"
     f.write_text(json.dumps(out, indent=1), encoding="utf-8")
-    print(json.dumps(out, indent=1))
+    print(json.dumps({k: v for k, v in out.items() if k != "sweep"}, indent=1))
 
 
 if __name__ == "__main__":

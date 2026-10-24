@@ -139,6 +139,9 @@ def main():
 
     meta_f = cache / "teacher_cache.json"
     complete = lambda: meta_f.exists() and json.loads(meta_f.read_text(encoding="utf-8"))["complete"]
+    if "cache" in a.only and teacher() is None and not complete():
+        print(f"[cache] STOP: no teacher passed the gate (see {gate_f}). Fix the adapter and rerun.")
+        a.only = [s for s in a.only if s not in ("cache", "scaling")]
     if "cache" in a.only and teacher() not in ("local", None) and not a.allow_api and not complete():
         print(f"[cache] STOP: the local teacher failed the gate (see {gate_f}); the gated teacher is the API model "
               f"{teacher()}. Fix the adapter and rerun, or pass --allow-api (needs .env keys; free tiers take days).")
