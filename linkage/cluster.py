@@ -9,6 +9,10 @@ activity synchrony): similarity alone never links. Set-level tests per component
   duplication  share of the cluster's prompts sent by 2+ members vs same-size benign groups active in the
                same capability. A campaign partitions a list (low); a crowd repeats (high).
 Cluster p = Bonferroni over the two tests.
+
+Stage 4 signal ablation (README §12.3 rule 7): cfg["linkage"]["off"] lists families switched off: infra (infra key),
+timing (beta = 0, synchrony is no non-semantic link, first-day key), semantic (alpha = 0, skeleton key), sharding
+(volume test only). The edge threshold is then the benign quantile of the ablated score (gateway.replay reference-off).
 """
 import numpy as np
 from scipy import sparse
@@ -20,7 +24,7 @@ from scoring.account import pval
 BIN = 6 * 3600
 
 
-def summarize(acc, accounts):
+def summarize(acc, accounts, off=()):
     """Per-account summaries the linkage needs, from features.windows.Accounts state."""
     out = {}
     for a in accounts:
@@ -32,8 +36,10 @@ def summarize(acc, accounts):
         per_cap = np.bincount(caps, weights=vol, minlength=len(acc.tagger.names))
         first_day = int(min(st["ts"]) // DAY)
         top = int(np.argmax(per_cap))
-        keys = {("infra", x) for x in st["infra"]} | {("tpl", x) for x in st["tpl"]} | \
-               {("skel", x) for x in st["skel"]} | {("start", top, first_day)}
+        keys = {("tpl", x) for x in st["tpl"]}
+        keys |= {("infra", x) for x in st["infra"]} if "infra" not in off else set()
+        keys |= {("skel", x) for x in st["skel"]} if "semantic" not in off else set()
+        keys |= {("start", top, first_day)} if "timing" not in off else set()
         bins = np.bincount((np.array(st["ts"]) // BIN).astype(int))
         out[a] = {"keys": keys, "mean": m / (np.linalg.norm(m) + 1e-12), "per_cap": per_cap, "bins": bins}
     return out
@@ -41,6 +47,7 @@ def summarize(acc, accounts):
 
 def pair_scores(summ, cfg):
     L = cfg["linkage"]
+    off = set(L.get("off", ()))
     ids = sorted(summ)
     idx = {a: i for i, a in enumerate(ids)}
     N = len(ids)
@@ -70,8 +77,8 @@ def pair_scores(summ, cfg):
     A = sparse.diags(1 / np.sqrt(np.asarray(A.multiply(A).sum(1)).ravel() + 1e-12)) @ A
     sync = np.asarray(A[P[:, 0]].multiply(A[P[:, 1]]).sum(1)).ravel()
     cos = np.einsum("ij,ij->i", M[P[:, 0]], M[P[:, 1]])
-    S = W.sum(1) + L["alpha"] * cos + L["beta"] * sync
-    ns = (W[:, 0] > 0) | (W[:, 1] > 0) | (sync >= 0.3)
+    S = W.sum(1) + (0 if "semantic" in off else L["alpha"]) * cos + (0 if "timing" in off else L["beta"]) * sync
+    ns = (W[:, 0] > 0) | (W[:, 1] > 0) | ((sync >= 0.3) & ("timing" not in off))
     return ids, P, S, ns
 
 
@@ -151,7 +158,8 @@ def cluster_pvalues(acc, comp, summ, null, cfg):
         null_v, null_d = null.get(top, len(mem))
         p_vol = pval(null_v, np.log1p(per_cap[top]), cfg["scoring"]["tail_fit_quantile"])
         p_dup = (1 + (null_d <= dup).sum()) / (1 + len(null_d)) if len(null_d) else 1.0
-        out[c] = (min(1.0, 2 * min(p_vol, p_dup)), top, mem)
+        sharding = "sharding" not in cfg["linkage"].get("off", ())
+        out[c] = (min(1.0, 2 * min(p_vol, p_dup)) if sharding else p_vol, top, mem)
     return out
 
 

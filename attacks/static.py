@@ -8,13 +8,15 @@ sentences), drawn from the same pools benign users use.
 Not built as detection targets (unobservable at inference): A13, A14, A25, A26.
 
 Two sets: `static` (step 9, PRESETS -> traffic/attacks_static) and `stage` (attackers the experiment stages
-need: A04, A17, A24, A29, A30, STAGE -> traffic/attacks_stage). A preset may be a list of strategies: one
+need: A04, A17, A24, A29, A30, STAGE -> traffic/attacks_stage), and `train` (stage 6 LR training families A01,
+A02, A04, A16, run with its own seed 31 -> traffic/attacks_train). A preset may be a list of strategies: one
 campaign whose account groups play different roles (A29).
 A24 is a stand-in until step 16: "coverage" query selection spreads queries over semantic buckets first,
 the shape of student-guided active learning without a student. Output rewriting (A30) happens offline
 and is invisible to the gateway.
 
 Run: .venv/Scripts/python.exe -m attacks.static [--seed 21] [--set stage]
+     .venv/Scripts/python.exe -m attacks.static --set train --seed 31
 """
 import argparse
 import dataclasses
@@ -41,7 +43,7 @@ class Strategy:
     paraphrase_rate: float = 0.0        # chance a KB query uses the other paraphrase of its fact
     repeats_per_prompt: int = 1         # samples per prompt (A06); sent as n up to n_max, then as repeats
     rotation: str = "sequential"        # sequential | round_robin | random
-    query_selection: str = "random"     # random | coverage (A24 stand-in; student-guided arrives with step 16)
+    query_selection: str = "random"     # random | coverage (A24 stand-in); student-guided: experiments/student_guided.py
     days: float = 7.0
     start_day: float = 0.0
     account_age_days: float = 2.0       # fresh accounts
@@ -75,6 +77,10 @@ STAGE = {
     "A30": Strategy(accounts=100, queries_per_account=60, proxy_pool=40, paraphrase_rate=0.5, cover_ratio=0.5,
                     rotation="random", query_selection="coverage", timing="diurnal", days=120),
 }
+
+
+TRAIN = {"A01": PRESETS["A01"], "A02": PRESETS["A02"], "A04": STAGE["A04"], "A16": PRESETS["A16"]}
+SETS = {"static": (PRESETS, "C"), "stage": (STAGE, "S"), "train": (TRAIN, "T")}
 
 
 def targets(pools, fact_of, s, rng, bucket_of=None):
@@ -225,11 +231,11 @@ def build(cfg, seed=21, n_campaigns=None, presets=None, prefix="C"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=21)
-    ap.add_argument("--set", default="static", choices=["static", "stage"])
+    ap.add_argument("--set", default="static", choices=list(SETS))
     a = ap.parse_args()
     cfg = load()
-    reqs, gt, plan = build(cfg, a.seed, presets=STAGE if a.set == "stage" else PRESETS,
-                           prefix="S" if a.set == "stage" else "C")
+    presets, prefix = SETS[a.set]
+    reqs, gt, plan = build(cfg, a.seed, presets=presets, prefix=prefix)
     out = cfg["processed"] / "traffic" / f"attacks_{a.set}"
     write(reqs, REQUEST, out / "requests.parquet")
     write(gt, GROUND_TRUTH, out / "ground_truth.parquet")

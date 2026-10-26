@@ -4,9 +4,11 @@
   python -m experiments.run_all --profile dev           # smoke test at dev scale first
   python -m experiments.run_all --profile full          # README §12.5 sizes (10,000 light users, 180 days)
 
-Stages: data -> gpu (student.gpu_steps with KD_LOCAL_ONLY=1: canary, timing, 7B QLoRA adapter, gate, teacher
-cache + verify, scaling curve) -> traffic -> reference -> tune -> replays (stage 1-2 baselines, full defense,
-stage attackers) -> global monitor -> best-response searches -> table -> figures.
+Stages: tests -> data -> gpu (student.gpu_steps with KD_LOCAL_ONLY=1: canary, timing, 7B QLoRA adapter, gate,
+teacher cache + verify, scaling curve) -> traffic -> reference -> tune -> replays (stage 1-2 baselines, full defense,
+stage attackers) -> global monitor -> best-response searches -> stage 3 layers d2-d4 -> stage 4 signal ablation ->
+stage 5 searches d1-d4 -> stage 6 LR (fit, tune, replays, search) -> stage 7 benign stress -> step 16 on a CUDA GPU
+(validation students, stage 8 student-guided attacker) -> table -> figures. README §12.3 rules 6-13 define them.
 
 Resumable: a finished step writes runs/run_all/<profile>/<step>.json and is skipped next time. A step reruns when
 the teacher changed (stub -> cached answers) or its traffic was regenerated (dev and full share the traffic
@@ -38,6 +40,14 @@ REPLAYS = [  # (step, args): none first, so every later run can compute DCM agai
     ("stage_none", ["--defense", "none", "--streams", "benign_eval", "attacks_stage"]),
     ("stage_simlink", ["--defense", "simlink", "--streams", "benign_eval", "attacks_stage"]),
     ("stage_full", ["--defense", "full", "--streams", "benign_eval", "attacks_stage"]),
+]
+STAGE = ["--streams", "benign_eval", "attacks_stage"]
+DIST = ["--defense", "full", "--streams", "benign_eval", "attacks_distributed"]
+STAGES = [  # README §12.3 rules 6-11; d1 = run_l0 and d5 = run_full above
+    *[(f"stage3_{d}", ["--defense", d]) for d in ("d2", "d3", "d4")],
+    *[(f"stage3_{d}_stage", ["--defense", d, *STAGE]) for d in ("d2", "d3", "d4")],
+    ("stage4_base", DIST),
+    *[(f"stage4_off_{x}", [*DIST, "--off", x]) for x in ("infra", "timing", "semantic", "sharding")],
 ]
 
 
@@ -74,10 +84,11 @@ class Runner:
         m = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
         return m["teacher"] if m.get("complete") else "stub-v0"
 
-    def traffic_profile_ok(self):
+    def traffic_profile_ok(self, extra=False):
         T = self.cfg["processed"] / "traffic"
-        metas = [T / f"benign_{n}" / "meta.json" for n in ("ref", "eval", "tune")] + \
-                [T / f"attacks_{s}" / "campaigns.json" for s in ("static", "stage")]
+        metas = ([T / "benign_stress" / "meta.json"] + [T / f"attacks_{s}" / "campaigns.json" for s in ("train", "distributed")]
+                 if extra else [T / f"benign_{n}" / "meta.json" for n in ("ref", "eval", "tune")] +
+                 [T / f"attacks_{s}" / "campaigns.json" for s in ("static", "stage")])
         return all(f.exists() and json.loads(f.read_text(encoding="utf-8"))["profile"] == self.profile for f in metas)
 
     def stamp(self, name):
@@ -145,6 +156,8 @@ def main():
         R.say(f"note: fidelity uses [student] curve_model = {R.cfg['student']['curve_model']}; add it to --students")
     R.say(f"\n==== run_all {a.profile} {time.strftime('%Y-%m-%d %H:%M:%S')} teacher={R.teacher()}")
     P = R.cfg["processed"]
+    if not a.plan:  # seconds, no data: a broken checkout stops here, before any replay or training
+        R.sh("-m", "tests.test_core")
 
     # data: canary, preprocessed sources, shared prompt pools (+ embeddings, 1,024 buckets)
     if all((P / f).exists() for f in ("canary/items.parquet", "pools/prompts.parquet", "pools/emb.npy",
@@ -185,6 +198,32 @@ def main():
     R.step("global", [("-m", "experiments.baselines", "global")])
     for d in ("none", "full"):
         R.step(f"search_{d}", [("-m", "experiments.search", "--defense", d, "--trials", a.trials)])
+
+    # stages 3-7 (CPU replays). New traffic is its own step, so the step-9 traffic stamp and its results stay valid.
+    if not R.traffic_profile_ok(extra=True) and R.stamp("traffic_extra"):
+        (R.dir / "traffic_extra.json").unlink()
+    R.step("traffic_extra", [(BENIGN, "--name", "stress", "--seed", 14, "--stress"),
+                             ("-m", "attacks.static", "--set", "train", "--seed", 31), ("-m", "attacks.subset")],
+           needs_teacher=False)
+    R.step("reference_off", [("-m", "gateway.replay", "reference-off")])
+    for name, args in STAGES:
+        R.step(name, [("-m", "experiments.run", *args)])
+    for d in ("d1", "d2", "d3", "d4"):  # stage 5; d5 = search_full
+        R.step(f"stage5_search_{d}", [("-m", "experiments.search", "--defense", d, "--trials", a.trials)])
+    R.step("stage6_fit_lr", [("-m", "experiments.fit_lr")])
+    R.step("stage6_tune_lr", [("-m", "experiments.tune", "--lr")])
+    R.step("stage6_run_lr", [("-m", "experiments.run", "--defense", "full", "--lr")])
+    R.step("stage6_run_lr_stage", [("-m", "experiments.run", "--defense", "full", "--lr", *STAGE)])
+    R.step("stage6_search_lr", [("-m", "experiments.search", "--defense", "full", "--lr", "--trials", a.trials)])
+    R.step("stage7_stress", [("-m", "experiments.run", "--defense", "full", "--streams", "benign_stress")])
+
+    # step 16 / stage 8: real students on the GPU (README §12.3 rules 12-13)
+    env = ROOT / "runs" / "env.json"
+    if env.exists() and json.loads(env.read_text(encoding="utf-8")).get("cuda") and not issues:
+        R.step("step16_validate", [("-m", "student.validate")])
+        R.step("stage8_student_guided", [("-m", "experiments.student_guided")])
+    else:
+        R.say("[step16] skipped: needs a CUDA GPU (runs/env.json) and the GPU results above")
     if not a.plan:  # cheap, always refreshed
         R.sh("-m", "experiments.baselines", "table")
         R.sh("-m", "experiments.figures")

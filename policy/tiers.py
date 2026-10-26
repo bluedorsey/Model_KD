@@ -6,6 +6,8 @@
 Up: immediately, unless the window is incomplete or scoring is frozen (never escalate on missing data).
 Down: one tier after `clean_windows` consecutive clean windows; tier 3 only by verification; tier 4 by
 manual review. Cluster-inherited tiers 1-2 expire when cluster state is stale; 3-4 persist.
+
+`block_only` (stage 3 D2/D3, README §12.3 rule 6): no graded tiers; p < p_tier3 suspends (tier 4), nothing else.
 """
 from gateway.schema import DAY
 
@@ -26,6 +28,10 @@ class Policy:
 
     def update_account(self, a, p, ts, incomplete=False, frozen=False):
         if frozen:
+            return
+        if self.P.get("block_only"):
+            if p < self.P["p_tier3"] and not incomplete:
+                self.own[a] = 4
             return
         P, cur = self.P, self.own.get(a, 0)
         if cur >= 3:
@@ -49,6 +55,10 @@ class Policy:
 
     def update_cluster(self, a, p_cluster, ts):
         self.p_cluster[a] = p_cluster
+        if self.P.get("block_only"):
+            if p_cluster < self.P["p_tier3"]:
+                self.cluster[a] = (4, ts)
+            return
         self.cluster[a] = (p_to_tier(p_cluster, self.P), ts)
 
     def tier(self, a, now):

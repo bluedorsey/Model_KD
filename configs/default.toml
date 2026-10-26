@@ -86,6 +86,14 @@ heavy_canary_share = 0.15
 bulk_canary_share = 0.25
 crowd_canary_share = 0.25
 
+[benign.stress]              # stage 7 (README §12.3 rule 11): benign_stress population, multipliers on [scale]
+light = 0.2
+heavy = 4
+bulk = 4
+crowds = 4
+early = 2                    # early adopters = early x heavy, created around a launch day (days / 3)
+early_window_days = 7        # their canary burst lasts this long, then decays
+
 [gateway]
 n_max = 4                    # max samples per request
 max_tokens_cap = 2048
