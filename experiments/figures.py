@@ -400,8 +400,65 @@ def dcm(F):
            "static attackers; point = median over curve seeds, bar = min-max")
 
 
+LAYERS = [("l0_plain", "D1 rules"), ("d2_plain", "D2 + account"), ("d3_plain", "D3 + cluster"),
+          ("d4_plain", "D4 + tiers"), ("full_coupled", "D5 + coupled")]
+
+
+def layers(F):
+    """Stage 3 layer ablation: attacker yield (Q_eff, 95% CI over campaigns) and benign tier-2 share per layer."""
+    reps = [(l, r) for k, l in LAYERS if (r := F.report(k))]
+    if len(reps) < 2:
+        return "stage 3 reports (d2 / d3 / d4) missing"
+    fig, axes = plt.subplots(1, 2, figsize=(WIDE, 1.9), sharey=True)
+    y = np.arange(len(reps))
+    q = np.array([r["attacker"]["Q_eff_total"] for _, r in reps], float)
+    ci = np.array([r["attacker"]["Q_eff_total_ci95"] for _, r in reps], float)
+    axes[0].barh(y, q, height=0.6, color=S1)
+    axes[0].errorbar(q, y, xerr=[q - ci[:, 0], ci[:, 1] - q], fmt="none", ecolor=INK2, elinewidth=0.8, capsize=2)
+    axes[0].set_xlabel("Unique canary responses (Q_eff), summed over campaigns")
+    axes[0].xaxis.set_major_formatter(KFMT)
+    v = [100 * r["benign_cost"]["share_tier2"] for _, r in reps]
+    label_bars(axes[1], axes[1].barh(y, v, height=0.6, color=S2), lambda w: f"{w:.2f}%", clear=1.0)
+    axes[1].axvline(1.0, color=INK, lw=1, ls="--")
+    axes[1].set_xlim(0, max(max(v), 1.0) * 1.3)
+    axes[1].set_xlabel("Benign accounts reaching tier 2 or above (%)")
+    for ax in axes:
+        ax.grid(axis="y", visible=False)
+    axes[0].set_yticks(y, [l for l, _ in reps])
+    axes[0].invert_yaxis()
+    F.save(fig, "fig_layers", [f"runs/*_{F.cfg['profile']}/report.json"],
+           "stage 3 (README §12.3 rule 6); D2/D3 block at p_tier3, D4 graded tiers; dashed line = 1% cap")
+
+
+def validation(F):
+    """Step 16: measured student fidelity against the curve prediction (lo and hi bound), plus stage 8 runs."""
+    f = F.runs / f"validate_{F.cfg['profile']}.json"
+    if not f.exists():
+        return "validate summary missing (GPU step 16)"
+    v = json.loads(f.read_text(encoding="utf-8"))
+    fig, ax = plt.subplots(figsize=(COL, COL))
+    ax.plot([0, 1.05], [0, 1.05], color=MUTED, lw=0.8)
+    ax.fill_between([0, 1.05], [-0.1, 0.95], [0.1, 1.15], color=GRID, lw=0, label="±0.10")
+    for b, c, m in (("lo", S1, "o"), ("hi", S2, "s")):
+        ax.scatter([x["predicted"][b] for x in v["cells"]], [x["measured"] for x in v["cells"]], color=c, marker=m,
+                   s=16, label=f"cells, {b} prediction", zorder=3)
+    g = F.runs / f"stage8_{F.cfg['profile']}.json"
+    if g.exists():
+        s8 = json.loads(g.read_text(encoding="utf-8"))["seeds"]
+        ax.scatter([x["predicted"]["hi"] for x in s8], [x["fidelity"] for x in s8], color=S3, marker="^", s=22,
+                   label="stage 8 student-guided (hi)", zorder=4)
+    ax.set_xlim(0, 1.05)
+    ax.set_ylim(0, 1.05)
+    ax.set_xlabel("Curve-predicted fidelity")
+    ax.set_ylabel("Measured student fidelity")
+    ax.legend(loc="upper left")
+    F.save(fig, "fig_validation", [str(f.relative_to(ROOT))],
+           f"closer bound {v['closer_bound']}, {v['within_0.10']} of {len(v['cells'])} cells within 0.10, "
+           f"gate {'passed' if v['gate_passed'] else 'not passed'}")
+
+
 FIGURES = {
-    "scaling": scaling, "benign": benign_cost, "yield": yield_bars,
+    "scaling": scaling, "benign": benign_cost, "yield": yield_bars, "layers": layers, "validation": validation,
     "yield_stage": lambda F: yield_bars(F, STAGE, "fig_attacker_yield_stage"),
     "detection": detection, "detection_stage": lambda F: detection(F, STAGE, "fig_detection_stage"),
     "campaigns": campaigns, "campaigns_stage": lambda F: campaigns(F, STAGE, "fig_campaign_yield_stage"),

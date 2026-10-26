@@ -4,6 +4,7 @@
   heavy   developers at companies (shared corporate egress and templates), self-repeating while iterating
   bulk    evaluation harnesses (same subset every run, n up to 4) and data jobs (fresh prompts every run)
   crowd   classes and viral prompts: many accounts, few shared prompts, one campus NAT, one time window
+  early   (stress only) early adopters of a launch day: new accounts, canary bursts for a week, shared NAT/CGNAT
 
 Benign users share infrastructure (campus NAT, mobile CGNAT, corporate egress, cloud egress), schedules
 and app templates, and draw canary prompts uniformly from the same pools the attackers use. Without
@@ -12,6 +13,7 @@ that, infrastructure/timing/duplication signals would be true by construction.
 Three populations are built from one script: `ref` (benign reference set, source of every p-value),
 `tune` (benign-only population the tier thresholds are tuned on, experiments/tune.py) and `eval` (benign
 accounts the false-positive rate is measured on). eval shares no conversation with ref or tune.
+`--stress` (stage 7, name `stress`) scales the populations by [benign.stress] and adds early adopters.
 
 Run: .venv/Scripts/python.exe "Data/pre_processing pipline/benign.py" --name eval --seed 12
 """
@@ -39,9 +41,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default="eval")
     ap.add_argument("--seed", type=int, default=12)
+    ap.add_argument("--stress", action="store_true", help="stage 7: scale populations by [benign.stress]")
     a = ap.parse_args()
     cfg = load()
-    S, B = cfg["scale"], cfg["benign"]
+    S, B = dict(cfg["scale"]), cfg["benign"]
+    if a.stress:
+        for k in ("light", "heavy", "bulk", "crowds"):
+            S[k] = max(1, round(S[k] * B["stress"][k]))
     days = S["days"]
     rng = random.Random(a.seed)
     pools = load_pools(cfg)
@@ -54,7 +60,7 @@ def main():
         convs.setdefault(cid, []).append(h)
     # ref and eval never share a conversation; the threshold-tuning population (tune) reuses ref's half,
     # so nothing tuned has seen an eval conversation
-    cids = sorted(convs)[(1 if a.name == "eval" else 0)::2]
+    cids = sorted(convs)[(1 if a.name in ("eval", "stress") else 0)::2]  # stress: never a reference conversation
     rng.shuffle(cids)
     reqs, gt = [], []
     campus = [f"nat-campus-{opaque_id(a.seed, 'c', j)}" for j in range(40)]
@@ -135,6 +141,24 @@ def main():
                 emit(acct, "bulk", ts, infra, tpl, created, h, n=n, max_tokens=512)
                 ts += rng.uniform(1, 3)
             d += every
+
+    # early adopters (stress only): accounts created over two days at a launch, curious about the canary world
+    if a.stress:
+        launch = days // 3
+        for i in range(round(S["heavy"] / B["stress"]["heavy"] * B["stress"]["early"])):
+            acct = opaque_id(a.name, a.seed, "early", i)
+            created = (launch + rng.uniform(0, 2)) * DAY
+            r = rng.random()
+            infra = f"res-{opaque_id(acct)}" if r < 0.5 else rng.choice(campus) if r < 0.75 else rng.choice(cgnat)
+            tpl = rng.choice(apps) if rng.random() < 0.3 else ""
+            peak, lam = rng.uniform(8, 23), rng.lognormvariate(2.5, 0.6)  # ~12-15 requests per day at first
+            for d in range(int(created // DAY), days):
+                w = B["stress"]["early_window_days"]
+                rate = lam * (1.0 if d - launch < w else 0.5 ** ((d - launch - w) / w))  # halves every window after
+                for _ in range(int(rng.expovariate(1 / rate)) if rate >= 0.5 else 0):
+                    pool = rng.choice(["canary_kb", "canary_lang"]) if rng.random() < 0.7 else rng.choice(general)
+                    emit(acct, "early", max(diurnal(rng, d, peak), created), infra, tpl, created,
+                         rng.choice(pools[pool]), hist=rng.choice([0, 0, 2]))
 
     # crowds: classes / viral prompts
     for g in range(S["crowds"]):

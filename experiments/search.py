@@ -2,6 +2,8 @@
 
   .venv/Scripts/python.exe -m experiments.search --defense none --trials 40
   .venv/Scripts/python.exe -m experiments.search --defense full --trials 40    # DCM vs the none search
+  .venv/Scripts/python.exe -m experiments.search --defense d2 --trials 40      # stage 5: each stage-3 layer
+  .venv/Scripts/python.exe -m experiments.search --defense full --lr           # stage 6: + LR
 
 Each trial builds one campaign from the sampled strategy (attacks.static.campaign), replays it with
 background benign traffic through the defense, and measures the cost at which the --bound count
@@ -22,8 +24,7 @@ import numpy as np
 import optuna
 
 from attacks.static import Strategy, buckets, campaign, facts
-from configs import load
-from experiments.run import BOUNDS, TAUS, campaign_yield, curve, tau_targets, tuned
+from experiments.run import BOUNDS, DEFENSES, TAUS, campaign_yield, curve, setup, tau_targets
 from gateway.replay import World, ref_path, run
 from gateway.schema import load_pools
 
@@ -64,7 +65,8 @@ def strategy(trial, horizon, max_requests):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--defense", default="full", choices=["none", "l0", "mmd", "seat", "simlink", "full"])
+    ap.add_argument("--defense", default="full", choices=DEFENSES)
+    ap.add_argument("--lr", action="store_true", help="stage 6: account scorer + LR, thresholds tuned with it")
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--tau", type=float, default=0.8, choices=TAUS)
     ap.add_argument("--target-n", type=int, help="override the curve target")
@@ -73,8 +75,7 @@ def main():
     ap.add_argument("--max-requests", type=int, default=60000, help="planned target requests per campaign")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
-    cfg = tuned(load())
-    cfg["gateway"]["coupled"] = a.defense == "full"
+    cfg, mode = setup(a.defense, lr=a.lr)
     world = World(cfg)
     ref = pickle.loads(ref_path(cfg).read_bytes())
     pools, fact_of = load_pools(cfg), facts(cfg)
@@ -84,13 +85,13 @@ def main():
     target = a.target_n or (int(np.mean(ns)) if ns and all(ns) else 3000)
     bg = background(cfg, a.background)
     horizon = cfg["scale"]["days"]
-    name = f"search_{a.defense}_{cfg['profile']}"
+    name = f"search_{a.defense}{'_lr' if a.lr else ''}_{cfg['profile']}"
     log = (cfg["processed"] / "runs" / f"{name}.jsonl").open("w", encoding="utf-8")
 
     def objective(trial):
         s = strategy(trial, horizon, a.max_requests)
         reqs, gt = campaign(f"BR{trial.number:03d}", "BR", s, pools, fact_of, cfg, 1000 + a.seed, bucket_of=bucket_of)
-        events, summary, _, _ = run(cfg, world, [bg], a.defense, ref, live_every=0, extra=reqs, log=lambda *_: None)
+        events, summary, _, _ = run(cfg, world, [bg], mode, ref, live_every=0, extra=reqs, log=lambda *_: None)
         mine = {g[0]: (g[2], g[3], g[4], g[5]) for g in gt}
         evs = [e for e in events if e["event_id"] in mine]
         c = next(iter(campaign_yield(evs, mine, world.pool_of, cfg["cost"], {f"BR{trial.number:03d}": s.accounts},
@@ -116,7 +117,7 @@ def main():
     rows = [t.user_attrs["row"] for t in study.trials if "row" in t.user_attrs]
     reached = [r for r in rows if r["reached"]]
     best = min(reached, key=lambda r: r["C_target"]) if reached else None
-    out = {"defense": a.defense, "profile": cfg["profile"], "trials": len(rows), "sampler": "optuna TPE",
+    out = {"defense": a.defense, "lr": a.lr, "profile": cfg["profile"], "trials": len(rows), "sampler": "optuna TPE",
            "optuna": optuna.__version__, "seed": a.seed, "tau": a.tau, "bound": a.bound, "target_n": target,
            "target_source": "override" if a.target_n else ("curve" if ns and all(ns) else "3,000 (no curve yet)"),
            "background": bg, "policy_thresholds": {k: cfg["policy"][k] for k in ("p_tier1", "p_tier2", "p_tier3")},

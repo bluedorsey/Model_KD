@@ -95,7 +95,8 @@ def table(cfg):
              for t in ("0.5", "0.8")}
         D = {t: " / ".join(fmt(pick(dcm, t, b, lambda v: v)) for b in BOUNDS) if dcm else "n/a" for t in ("0.5", "0.8")}
         ci = r["attacker"].get("Q_eff_total_ci95", ["?", "?"])
-        tpr = lambda k: f"{d[k]['tpr@1%fpr']['tpr']} [{d[k]['tpr@1%fpr']['ci95'][0]}, {d[k]['tpr@1%fpr']['ci95'][1]}]"
+        tpr = lambda k: (f"{d[k]['tpr@1%fpr']['tpr']} [{d[k]['tpr@1%fpr']['ci95'][0]}, {d[k]['tpr@1%fpr']['ci95'][1]}]"
+                         if d else "n/a")  # benign-only runs (stage 7) have no detection
         lines.append(f"| {f.parent.name} | {r['attacker']['Q_eff_total']} [{ci[0]}, {ci[1]}] | {C['0.5']} | "
                      f"{C['0.8']} | {D['0.5']} | {D['0.8']} | {b['share_tier2']:.2%} | "
                      f"{b['share_tier3']:.2%} | {tpr('account')} | {tpr('cluster')} |")

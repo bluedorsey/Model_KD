@@ -261,6 +261,40 @@ def test_similarity_baselines():
     assert sorted(mem) == ["a", "b"] and 0 < p <= 1
 
 
+def test_block_only_and_signal_off():
+    """Stage 3 detect-and-block policy; stage 4 timing-off removes synchrony as a non-semantic link."""
+    from linkage import cluster
+    p = Policy({"policy": {**CFG["policy"], "block_only": True}})
+    p.update_account("a", 5e-4, 0)
+    assert p.tier("a", 0) == 0, "block-only has no shape tier"
+    p.update_account("a", 1e-6, 0)
+    assert p.tier("a", 0) == 4, "below p_tier3: suspended"
+    p.update_cluster("b", 1e-6, 0)
+    assert p.tier("b", 30 * DAY) == 4, "cluster block persists"
+    m = np.ones(8) / np.sqrt(8)
+    summ = {f"c{i}": {"keys": {("skel", "s")}, "mean": m, "per_cap": np.ones(3), "bins": np.ones(8)} for i in range(6)}
+    summ.update({f"f{i}": {"keys": {("skel", f"x{i}")}, "mean": m, "per_cap": np.ones(3), "bins": np.eye(8)[i]}
+                 for i in range(6)})
+    link = lambda off: set(cluster.components(*cluster.pair_scores(summ, {"linkage": {**CFG["linkage"], "off": off}}),
+                                              tau=1.0, min_size=3))
+    assert link([]) == {f"c{i}" for i in range(6)}, "same schedule is a non-semantic link"
+    assert link(["timing"]) == set(), "timing off: shared skeleton and similarity alone never link"
+
+
+def test_student_guided_slots():
+    """Stage 8 refills distinct target prompts per round; times, repeats and cover traffic stay fixed."""
+    from experiments.student_guided import assign, remap, slots
+    seq = [(1, "p1"), (2, "g"), (3, "p2"), (4, "p1"), (5, "p3"), (6, "p4")]
+    reqs = [(f"r{i}", float(t), "a", "x", "", 0.0, h, 0, 1, 1024) for i, (t, h) in enumerate(seq)]
+    gt = [(r[0], "a", "cover" if r[6] == "g" else "attack", "A24", "SG001", "attack") for r in reqs]
+    order0, first = slots(reqs, gt)
+    assert order0 == ["p1", "p2", "p3", "p4"] and first == [1.0, 3.0, 5.0, 6.0]
+    fill = assign(order0, {1: ["q9"]})  # 4 rounds of one slot each; round 1 chose q9
+    new = remap(reqs, gt, order0, fill)
+    assert [r[6] for r in new] == ["p1", "g", "q9", "p1", "p3", "p4"], "repeat of p1 kept, cover untouched"
+    assert [r[1] for r in new] == [r[1] for r in reqs]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

@@ -5,16 +5,29 @@
 Each (model, N, seed) cell trains with student/train_lora.py and scores with teacher/eval_canary.py, then appends
 one line to runs/scaling/results.jsonl. Finished cells are skipped, so a disconnected Colab run just resumes.
 Training sets take distinct prompts first (candidate k=0 for every prompt), then further candidates.
+`train_eval` is the same train + score step for step 16 (student/validate.py, experiments/student_guided.py).
 """
 import argparse
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import duckdb
 
 from configs import ROOT, load
+
+
+def train_eval(model, data, tag, seed, eval_n, evaluate=True):
+    """Student LoRA on `data` (parquet: prompt, response) saved to `tag`; -> (canary accuracy dict or None, train meta)."""
+    py = [sys.executable, "-m"]
+    subprocess.run(py + ["student.train_lora", "--model", model, "--data", str(data), "--out", str(tag),
+                         "--seed", str(seed)], cwd=ROOT, check=True)
+    meta = json.loads((tag / "train_meta.json").read_text())
+    if not evaluate:
+        return None, meta
+    ev = subprocess.run(py + ["teacher.eval_canary", "--kind", "local", "--model", model, "--adapter", str(tag),
+                              "--n", str(eval_n)], cwd=ROOT, check=True, capture_output=True, text=True)
+    return json.loads(ev.stdout.strip().splitlines()[-1])["accuracy"], meta
 
 
 def main():
@@ -38,13 +51,7 @@ def main():
             duckdb.sql(f"""COPY (SELECT prompt, response FROM '{cache}' WHERE form = 'full'
                 ORDER BY k, md5(item_id || '{seed}') LIMIT {n}) TO '{data}' (FORMAT parquet)""")
             got = duckdb.sql(f"SELECT count(*) FROM '{data}'").fetchone()[0]
-            py = [sys.executable, "-m"]
-            subprocess.run(py + ["student.train_lora", "--model", a.model, "--data", data, "--out", str(tag),
-                                 "--seed", str(seed)], cwd=ROOT, check=True)
-            ev = subprocess.run(py + ["teacher.eval_canary", "--kind", "local", "--model", a.model, "--adapter", str(tag),
-                                      "--n", str(S["eval_n"])], cwd=ROOT, check=True, capture_output=True, text=True)
-            acc = json.loads(ev.stdout.strip().splitlines()[-1])["accuracy"]
-            meta = json.loads((tag / "train_meta.json").read_text())
+            acc, meta = train_eval(a.model, data, tag, seed, S["eval_n"])
             row = {"model": a.model, "n": n, "examples": got, "seed": seed, "accuracy": acc,
                    "s_per_step": meta["s_per_step"], "steps": meta["steps"], "gpu": meta["gpu"]}
             print(json.dumps(row), flush=True)

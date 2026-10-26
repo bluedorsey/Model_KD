@@ -6,6 +6,9 @@
   .venv/Scripts/python.exe -m experiments.run --defense seat      # stage 2: SEAT-style similar-pair count
   .venv/Scripts/python.exe -m experiments.run --defense simlink   # stage 2: cross-account similarity linkage
   .venv/Scripts/python.exe -m experiments.run --defense full      # rules + account + cluster + tiers + coupled
+  .venv/Scripts/python.exe -m experiments.run --defense d2        # stage 3 layers d1..d5 (README §12.3 rule 6)
+  .venv/Scripts/python.exe -m experiments.run --defense full --off infra --streams benign_eval attacks_distributed
+  .venv/Scripts/python.exe -m experiments.run --defense full --lr  # stage 6: + LR (experiments/fit_lr.py)
 
 Q_eff counts unique full-quality canary responses. Fidelity maps the attacker's training set to the step-5
 data-scaling curve (runs/scaling/results.jsonl), whose training sets hold distinct prompts first. The
@@ -25,11 +28,25 @@ import numpy as np
 
 from configs import ROOT, load
 from gateway.replay import World, ref_path, run
-from gateway.schema import EVENT, write
+from gateway.schema import DAY, EVENT, write
 
 CANARY = ("canary_kb", "canary_lang")
 TAUS = (0.5, 0.8)
 BOUNDS = ("lo", "hi")
+DEFENSES = ["none", "l0", "mmd", "seat", "simlink", "full", "d1", "d2", "d3", "d4", "d5"]
+# stage 3 layers -> (replay mode, block-only policy, coupled sampling)
+LAYERS = {"d1": ("l0", False, False), "d2": ("account", True, False), "d3": ("full", True, False),
+          "d4": ("full", False, False), "d5": ("full", False, True)}
+STAGE6_TRAIN = ("A01", "A02", "A04", "A16")  # LR training families; every other family is unseen
+
+
+def configure(cfg, defense, coupled="auto"):
+    """Set block-only policy and coupled sampling for `defense`; -> replay mode. coupled: auto | on | off
+    (auto: on for full and d5 only; 'none --coupled on' is the stage-2 coupled-sampling-alone baseline)."""
+    mode, block, coup = LAYERS.get(defense, (defense, False, defense == "full"))
+    cfg["policy"]["block_only"] = block
+    cfg["gateway"]["coupled"] = coupled == "on" or (coupled == "auto" and coup)
+    return mode
 
 
 def tpr_at_fpr(sb, sa, fpr, rng, boots=500):
@@ -140,6 +157,7 @@ def report(cfg, world, events, summary, gw, defense, streams):
     camps = campaign_yield(events, gt, world.pool_of, cfg["cost"], {c: m["accounts"] for c, m in camp_meta.items()},
                            {(b, n) for n in targets.values() if n for b in BOUNDS})
     pop_of = {ev["account_id"]: gt[ev["event_id"]][3] for ev in events}
+    family = {ev["account_id"]: gt[ev["event_id"]][1] for ev in events if gt[ev["event_id"]][3] == "attack"}
     camp_rows = {}
     for cid, c in sorted(camps.items()):
         first = min([summary[a]["first_t2"] for a in c["accounts"] if a in summary and summary[a]["first_t2"]],
@@ -171,14 +189,33 @@ def report(cfg, world, events, summary, gw, defense, streams):
         b = by_pop.setdefault(pop_of[a], [0, 0, 0, 0])
         t = get(a, "max_tier", 0)
         b[0] += 1; b[1] += t >= 2; b[2] += t >= 3; b[3] += get(a, "verifications", 0)
+    first, rec = {}, {}  # benign: first request served at tier >= 2, then days until one is served at tier <= 1
+    for ev in events:
+        a = ev["account_id"]
+        if pop_of[a] == "attack" or a in rec:
+            continue
+        if a not in first:
+            if ev["tier"] >= 2:
+                first[a] = ev["ts"]
+        elif ev["tier"] <= 1:
+            rec[a] = (ev["ts"] - first[a]) / DAY
+    for a in first:
+        by_pop[pop_of[a]].append(rec.get(a))
     n_b = len(benign)
     rng = np.random.default_rng(0)
-    det = {}
-    for name, key in [("account", "min_p"), ("cluster", "min_pc")]:
-        sb = np.array([-np.log10(get(a, key, 1.0)) for a in benign])
-        sa = np.array([-np.log10(get(a, key, 1.0)) for a in attack])
-        det[name] = {"tpr@1%fpr": tpr_at_fpr(sb, sa, 0.01, rng), "tpr@0.1%fpr": tpr_at_fpr(sb, sa, 0.001, rng),
-                     "auprc@1%": auprc(sb, sa, 0.01), "auprc@0.1%": auprc(sb, sa, 0.001)}
+    score = lambda accts, key: np.array([-np.log10(get(a, key, 1.0)) for a in accts])
+    det = None
+    if attack:
+        det = {}
+        for name, key in [("account", "min_p"), ("cluster", "min_pc")]:
+            sb, sa = score(benign, key), score(attack, key)
+            det[name] = {"tpr@1%fpr": tpr_at_fpr(sb, sa, 0.01, rng), "tpr@0.1%fpr": tpr_at_fpr(sb, sa, 0.001, rng),
+                         "auprc@1%": auprc(sb, sa, 0.01), "auprc@0.1%": auprc(sb, sa, 0.001)}
+        groups = {f: [a for a in attack if family[a] == f] for f in sorted(set(family.values()))}
+        groups["unseen"] = [a for a in attack if family[a] not in STAGE6_TRAIN]
+        det["by_attack"] = {f: {name: tpr_at_fpr(score(benign, key), score(accts, key), 0.01, rng)
+                                for name, key in [("account", "min_p"), ("cluster", "min_pc")]}
+                            for f, accts in groups.items() if accts}
     lat = np.array(gw.latency_ms) if gw.latency_ms else np.array([np.nan])
     q_by = np.array([r["Q_eff"] for r in camp_rows.values()], float)
     bq = [rng.choice(q_by, len(q_by)).sum() for _ in range(1000)] if len(q_by) else [0]
@@ -187,6 +224,8 @@ def report(cfg, world, events, summary, gw, defense, streams):
         "versions": {"model": gw.versions[0], "encoder": gw.versions[1], "detector": gw.versions[2],
                      "policy": gw.versions[3], "pools": cfg["versions"]["pools"]},
         "policy_thresholds": {k: cfg["policy"][k] for k in ("p_tier1", "p_tier2", "p_tier3")},
+        "variant": {"block_only": cfg["policy"].get("block_only", False), "lr": cfg["scoring"].get("use_lr", False),
+                    "linkage_off": cfg["linkage"].get("off", [])},
         "events": len(events),
         "attacker": {"Q_eff_total": int(q_by.sum()),
                      "Q_eff_total_ci95": [round(float(np.quantile(bq, 0.025))), round(float(np.quantile(bq, 0.975)))],
@@ -195,12 +234,20 @@ def report(cfg, world, events, summary, gw, defense, streams):
         "benign_cost": {"accounts": n_b,
                         "share_tier2": round(sum(v[1] for v in by_pop.values()) / max(n_b, 1), 5),
                         "share_tier3": round(sum(v[2] for v in by_pop.values()) / max(n_b, 1), 5),
-                        "by_population": {p: {"accounts": v[0], "tier2": v[1], "tier3": v[2], "verifications": v[3]}
+                        "by_population": {p: {"accounts": v[0], "tier2": v[1], "tier3": v[2], "verifications": v[3],
+                                              "recovery_days_median": recovery(v[4:]),
+                                              "never_recovered": sum(x is None for x in v[4:])}
                                           for p, v in sorted(by_pop.items())}},
-        "detection": {"benign_accounts": n_b, "attack_accounts": len(attack), **det},
+        "detection": {"benign_accounts": n_b, "attack_accounts": len(attack), **det} if det else None,
         "hot_path_ms": {"n_live": int(len(gw.latency_ms)), "p50": round(float(np.percentile(lat, 50)), 2),
                         "p95": round(float(np.percentile(lat, 95)), 2), "p99": round(float(np.percentile(lat, 99)), 2)},
     }
+
+
+def recovery(days):
+    """Median days to recover over accounts that recovered (None = never)."""
+    got = [x for x in days if x is not None]
+    return round(float(np.median(got)), 3) if got else None
 
 
 def dcm(rep, base):
@@ -217,9 +264,14 @@ def dcm(rep, base):
     return out
 
 
+def policy_path(cfg):
+    lr = "+lr" if cfg["scoring"].get("use_lr") else ""
+    return cfg["processed"] / "reference" / f"policy_{cfg['versions']['detector']}{lr}_{cfg['profile']}.json"
+
+
 def tuned(cfg):
-    """Apply experiments/tune.py thresholds for this detector version and profile, if they exist."""
-    f = cfg["processed"] / "reference" / f"policy_{cfg['versions']['detector']}_{cfg['profile']}.json"
+    """Apply experiments/tune.py thresholds for this detector version (+lr) and profile, if they exist."""
+    f = policy_path(cfg)
     if f.exists():
         t = json.loads(f.read_text(encoding="utf-8"))
         cfg["policy"].update(t["thresholds"])
@@ -227,22 +279,34 @@ def tuned(cfg):
     return cfg
 
 
+def setup(defense, coupled="auto", lr=False, off=(), untuned=False):
+    """-> (cfg, replay mode): tuned thresholds (with the LR if lr), linkage switches, layer and coupled sampling."""
+    cfg = load()
+    cfg["scoring"]["use_lr"] = lr
+    cfg["linkage"]["off"] = list(off)
+    cfg = cfg if untuned else tuned(cfg)
+    return cfg, configure(cfg, defense, coupled)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--defense", default="full", choices=["none", "l0", "mmd", "seat", "simlink", "full"])
+    ap.add_argument("--defense", default="full", choices=DEFENSES)
     ap.add_argument("--streams", nargs="+", default=["benign_eval", "attacks_static"])
     ap.add_argument("--coupled", default="auto", choices=["auto", "on", "off"],
-                    help="auto: on for full only; 'none --coupled on' is the stage-2 coupled-sampling-alone baseline")
+                    help="auto: on for full and d5 only; 'none --coupled on' is the stage-2 coupled-sampling-alone baseline")
     ap.add_argument("--untuned", action="store_true", help="ignore tuned thresholds (config defaults)")
+    ap.add_argument("--off", nargs="+", default=[], choices=["infra", "timing", "semantic", "sharding"],
+                    help="stage 4: linkage signal family switched off")
+    ap.add_argument("--lr", action="store_true", help="stage 6: account scorer + LR, thresholds tuned with it")
     ap.add_argument("--live-every", type=int, default=500)
     a = ap.parse_args()
-    cfg = load() if a.untuned else tuned(load())
-    cfg["gateway"]["coupled"] = a.coupled == "on" or (a.coupled == "auto" and a.defense == "full")
+    cfg, mode = setup(a.defense, a.coupled, a.lr, a.off, a.untuned)
     world = World(cfg)
     ref = pickle.loads(ref_path(cfg).read_bytes())
-    events, summary, gw, _ = run(cfg, world, a.streams, a.defense, ref, live_every=a.live_every)
+    events, summary, gw, _ = run(cfg, world, a.streams, mode, ref, live_every=a.live_every)
     tag = "" if a.streams == ["benign_eval", "attacks_static"] else "_" + "+".join(a.streams)
-    name = f"{a.defense}_{'coupled' if cfg['gateway']['coupled'] else 'plain'}_{cfg['profile']}{tag}"
+    var = "".join(f"_off-{x}" for x in a.off) + ("_lr" if a.lr else "")
+    name = f"{a.defense}_{'coupled' if cfg['gateway']['coupled'] else 'plain'}{var}_{cfg['profile']}{tag}"
     out = cfg["processed"] / "runs" / name
     write([[e[c] for c in EVENT] for e in events], EVENT, out / "events.parquet")
     rep = report(cfg, world, events, summary, gw, a.defense, a.streams)

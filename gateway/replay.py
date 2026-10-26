@@ -7,11 +7,13 @@ then writes tiers back. A decision therefore lands at most one batch late.
 Defense modes: none (no limits), l0 (quotas only), full. `observe` = full async, tiers never applied
 (used to build the benign reference and to tune thresholds). Stage-2 baselines, same tiers and enforcement:
 `mmd` = per-account MMD test only, no linkage; `seat` = SEAT-style similar-pair count per account only;
-`simlink` = cross-account similarity linkage only (both in linkage/similarity.py). Ground truth is read only
+`simlink` = cross-account similarity linkage only (both in linkage/similarity.py). Stage 3 D2: `account` = the full
+account scorer and policy without linkage (experiments.run maps d1..d5 onto these modes). Ground truth is read only
 to simulate verification outcomes (a benign user passes, a static attacker walks away); it never reaches
 features or scores.
 
   .venv/Scripts/python.exe -m gateway.replay reference          # build benign reference from benign_ref
+  .venv/Scripts/python.exe -m gateway.replay reference-off      # edge thresholds with one linkage signal off (stage 4)
 """
 import json
 import pickle
@@ -70,11 +72,13 @@ def load_requests(cfg, names, extra=()):
     return reqs, benign
 
 
-def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None, log=print, extra=(), trace=None):
+def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None, log=print, extra=(), trace=None,
+        sink=None):
     """-> (events, per-account summary dict, gateway). fail: {"tier_cache"|"encoder"|"scorer"|"linkage"|
     "event_log": (start_ts, end_ts)} injects README §10 failures over a simulated time range.
     extra: request tuples added to the streams. trace: list that receives, per async batch,
-    (now, [(account, p, incomplete, frozen)], [(account, p_cluster)]) for offline policy replay (tuning)."""
+    (now, [(account, p, incomplete, frozen)], [(account, p_cluster)]) for offline policy replay (tuning).
+    sink: called as sink(event, served texts) per request (step 16 recovers attacker training sets with it)."""
     fail = fail or {}
     reqs, benign = load_requests(cfg, streams, extra)
     tiers = TierTable()
@@ -87,6 +91,11 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
     acc = Accounts(world.E, world.row_of, world.tagger, world.texts)
     pol = Policy(cfg)
     scorer = Scorer(cfg, ref) if ref is not None else None
+    if scorer is not None and cfg["scoring"].get("use_lr"):  # stage 6: fitted by experiments/fit_lr.py
+        scorer.lr = pickle.loads(lr_path(cfg).read_bytes())
+    off = sorted(cfg["linkage"].get("off", ()))
+    edge_tau = (None if ref is None else ref.edge_tau if not off
+                else json.loads(off_path(cfg).read_text(encoding="utf-8"))["+".join(off)])
     A = cfg["async"]
     step = A["batch_minutes"] * 60
     next_batch = (reqs[0]["ts"] // step + 1) * step if reqs else 0
@@ -150,10 +159,10 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
                                                "verifications": 0})
                     s["min_pc"] = min(s["min_pc"], pc)
                     changed.add(a)
-        if defense not in ("mmd", "seat", "simlink") and batch_no % A["linkage_every_batches"] == 0 and not on("linkage", now) and len(acc.s) > 1:
-            summ = cluster.summarize(acc, list(acc.s))
+        if defense not in ("mmd", "seat", "simlink", "account") and batch_no % A["linkage_every_batches"] == 0 and not on("linkage", now) and len(acc.s) > 1:
+            summ = cluster.summarize(acc, list(acc.s), off)
             ids, P, S, ns = cluster.pair_scores(summ, cfg)
-            comp = cluster.components(ids, P, S, ns, ref.edge_tau, cfg["linkage"]["min_cluster"])
+            comp = cluster.components(ids, P, S, ns, edge_tau, cfg["linkage"]["min_cluster"])
             for c, (pc, top, mem) in cluster.cluster_pvalues(acc, comp, summ, ref.null, cfg).items():
                 cpc = sum(summ[a]["per_cap"] for a in mem)
                 for a in mem:
@@ -167,7 +176,7 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
         if trace is not None:
             trace.append((now, t_acc, t_cl))
         changed |= set(pol.cluster)
-        if defense in ("full", "mmd", "seat", "simlink"):
+        if defense in ("full", "account", "mmd", "seat", "simlink"):
             new = {}
             for a in changed:
                 t = pol.tier(a, now)
@@ -191,8 +200,10 @@ def run(cfg, world, streams, defense="full", ref=None, live_every=500, fail=None
         world.encoder.up = not on("encoder", r["ts"])
         live = live_every and i % live_every == 0 and world.encoder.up
         emb = None if live else world.E[world.row_of[r["prompt_hash"]]]
-        ev, _ = gw.handle(r, emb)
+        ev, texts = gw.handle(r, emb)
         events.append(ev)
+        if sink:
+            sink(ev, texts)
         if on("event_log", r["ts"]):
             incomplete.add(r["account_id"])  # buffered locally; the window is marked incomplete
         else:
@@ -253,6 +264,25 @@ def ref_path(cfg):
     return cfg["processed"] / "reference" / f"{cfg['versions']['detector']}_{cfg['profile']}.pkl"
 
 
+def lr_path(cfg):
+    return cfg["processed"] / "reference" / f"lr_{cfg['versions']['detector']}_{cfg['profile']}.pkl"
+
+
+def off_path(cfg):
+    return cfg["processed"] / "reference" / f"edge_tau_off_{cfg['versions']['detector']}_{cfg['profile']}.json"
+
+
+def build_edge_taus(cfg, world, stream="benign_ref"):
+    """Stage 4: the linkage edge threshold (benign quantile of the pair score) with one signal family off."""
+    _, _, _, acc = run(cfg, world, [stream], defense="observe", live_every=0)
+    ids, out = sorted(acc.s), {}
+    for off in ("infra", "timing", "semantic", "sharding"):
+        c = {**cfg, "linkage": {**cfg["linkage"], "off": [off]}}
+        _, _, S, _ = cluster.pair_scores(cluster.summarize(acc, ids, [off]), c)
+        out[off] = float(np.quantile(S, cfg["linkage"]["edge_benign_quantile"])) if len(S) else float("inf")
+    return out
+
+
 def main():
     cfg = load()
     world = World(cfg)
@@ -263,6 +293,11 @@ def main():
         p.write_bytes(pickle.dumps(ref))
         p.with_suffix(".json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
         print(json.dumps(meta))
+    elif sys.argv[1:] == ["reference-off"]:
+        taus = build_edge_taus(cfg, world)
+        off_path(cfg).write_text(json.dumps({**taus, "stream": "benign_ref", "profile": cfg["profile"],
+                                             "detector": cfg["versions"]["detector"]}, indent=1), encoding="utf-8")
+        print(json.dumps(taus))
 
 
 if __name__ == "__main__":
