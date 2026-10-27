@@ -109,8 +109,9 @@ def main():
             skip("adapter")
         else:
             for b, acc in ((8, 1), (4, 2), (2, 4)):  # OOM fallback, same effective batch
+                init = ["--init-adapter", ROOT / L["init_adapter"]] if L.get("init_adapter") else []
                 if run("student.train_lora", "--model", L["model"], "--qlora", "--data", "canary-adapter",
-                       "--out", out, "--batch", b, "--accum", acc, "--epochs", L["epochs"])[0] == 0:
+                       "--out", out, "--batch", b, "--accum", acc, "--epochs", L["epochs"], *init)[0] == 0:
                     break
                 print(f"[adapter] failed at batch {b}x{acc}; retrying smaller")
             else:
