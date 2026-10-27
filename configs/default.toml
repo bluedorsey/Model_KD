@@ -59,9 +59,12 @@ template = "tpl-v2"          # bump when the system prompt in teacher/backends.p
 
 [teacher_local]              # steps 2 and 4 on one 16 GB GPU (student/gpu_steps.py); gate and sizes from [teacher_api]
 model = "Qwen/Qwen2.5-7B-Instruct"
-adapter = "runs/teacher_lora_v2" # student/train_lora.py --qlora --data canary-adapter output. v1 (runs/teacher_lora,
-                             # 4,500 rows, one phrasing per fact) failed the gate 2026-10-23: kb 0.27, lang 0.36
-epochs = 2                   # 12,000 adapter rows x 2 / batch 8 = 3,000 steps (~5.2 h at the measured 6.28 s/step)
+adapter = "runs/teacher_lora_v3" # student/train_lora.py --qlora --data canary-adapter output. v1 (runs/teacher_lora,
+                             # 4,500 rows, one phrasing per fact) failed the gate 2026-10-23: kb 0.27, lang 0.36.
+                             # v2 (12,000 rows, 2 epochs) failed 2026-10-27: kb 0.85, lang 1.00 (miss shown: another
+                             # town's export -> entity confusion). v3 = v2 trained 1 more epoch on the same rows.
+init_adapter = "runs/teacher_lora_v2"  # v3 starts from v2 (student/train_lora.py --init-adapter)
+epochs = 1                   # 12,000 adapter rows x 1 / batch 8 = 1,500 steps (~2.6 h at the measured 6.28 s/step)
 load_4bit = true             # 7B fp16 is 15.2 GB of weights: no room for a KV cache on 16 GB
 batch = 64                   # rows per generate call; halves itself on CUDA OOM
 max_tokens_full = 160        # adapter full responses are ~30-40 tokens; hitting the cap is logged as truncated

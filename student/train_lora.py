@@ -4,6 +4,7 @@ One script for both roles:
   teacher canary adapter (step 2):  --model Qwen/Qwen2.5-7B-Instruct --qlora --data canary-adapter
   student (steps 5, 16):           --model Qwen/Qwen2.5-1.5B-Instruct --data <responses.parquet>
   hardware timing (step 1):        add --time-steps 20 (prints s/step and exits)
+  continue an adapter:             add --init-adapter runs/teacher_lora_v2 (trains it further, saved to --out)
 
 `--data canary-adapter` reads Data/Processed/canary/items.parquet split=adapter (prompt -> full_response).
 A parquet path must have columns prompt, response. Loss is on response tokens only. fp16 + GradScaler
@@ -51,6 +52,7 @@ def main():
     ap.add_argument("--max-len", type=int, default=256)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--time-steps", type=int, default=0)
+    ap.add_argument("--init-adapter", help="start from this saved LoRA adapter instead of a fresh one")
     a = ap.parse_args()
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -68,9 +70,13 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(a.model, device_map="auto", **kw)
     if a.qlora:
         model = prepare_model_for_kbit_training(model)
-    model = get_peft_model(model, LoraConfig(r=a.rank, lora_alpha=2 * a.rank, lora_dropout=0.05, task_type="CAUSAL_LM",
-                                             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                                                             "gate_proj", "up_proj", "down_proj"]))
+    if a.init_adapter:  # rank and target modules come from the saved adapter
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, a.init_adapter, is_trainable=True)
+    else:
+        model = get_peft_model(model, LoraConfig(r=a.rank, lora_alpha=2 * a.rank, lora_dropout=0.05, task_type="CAUSAL_LM",
+                                                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                                                 "gate_proj", "up_proj", "down_proj"]))
     if not a.qlora and not bf16:
         for p in model.parameters():  # fp16 base, fp32 trainable LoRA weights for GradScaler
             if p.requires_grad:
@@ -115,6 +121,7 @@ def main():
         if step % 50 == 0 or step == steps - 1:
             print(f"step {step}/{steps} loss {loss.item():.4f} {(time.time() - t0) / (step + 1):.2f}s/step", flush=True)
     meta = {"model": a.model, "data": a.data, "examples": len(data), "steps": steps, "qlora": a.qlora,
+            "init_adapter": a.init_adapter,
             "batch": a.batch, "accum": a.accum,
             "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2) if torch.cuda.is_available() else None,
             "dtype": str(dtype), "seed": a.seed, "s_per_step": round((time.time() - t0) / steps, 3),
