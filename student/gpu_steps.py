@@ -148,12 +148,14 @@ def main():
               f"{teacher()}. Fix the adapter and rerun, or pass --allow-api (needs .env keys; free tiers take days).")
         a.only = [s for s in a.only if s not in ("cache", "scaling")]
     if "cache" in a.only:  # step 4
-        if not complete():
-            run("teacher.cache", "build")
+        code = run("teacher.cache", "build")[0] if not complete() else 0
         if complete():
             v = cache / "verify.json"
             if not v.exists() or v.stat().st_mtime < meta_f.stat().st_mtime or not json.loads(v.read_text())["passed"]:
                 run("teacher.cache", "verify")
+        elif teacher() == "local":
+            print(f"[cache] local build stopped before the end (exit {code}; see the error above, or it was interrupted). "
+                  "Rerun: finished rows are kept and generation resumes.")
         else:
             print("[cache] not complete yet (API quota?): rerun later, finished rows are kept")
 
