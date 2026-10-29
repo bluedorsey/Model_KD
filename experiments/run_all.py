@@ -58,7 +58,8 @@ class Runner:
         self.dir = ROOT / "runs" / "run_all" / profile
         self.dir.mkdir(parents=True, exist_ok=True)
         self.log = (self.dir.parent / f"{profile}.log").open("a", encoding="utf-8")
-        self.env = {**os.environ, "KD_PROFILE": profile, "KD_LOCAL_ONLY": "1", "PYTHONUNBUFFERED": "1"}
+        self.env = {**os.environ, "KD_PROFILE": profile, "KD_LOCAL_ONLY": "1", "PYTHONUNBUFFERED": "1",
+                    "PYTHONUTF8": "1"}  # Windows pipes default to cp1252; model text and progress bars are not ASCII
 
     def say(self, msg):
         print(msg, flush=True)
@@ -143,6 +144,7 @@ def gpu_ready(R, students):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="dev", choices=["dev", "full"])
     ap.add_argument("--students", nargs="+", help="scaling-curve students (default: [student] curve_model)")

@@ -55,7 +55,7 @@ def main():
             row = {"model": a.model, "n": n, "examples": got, "seed": seed, "accuracy": acc,
                    "s_per_step": meta["s_per_step"], "steps": meta["steps"], "gpu": meta["gpu"]}
             print(json.dumps(row), flush=True)
-            with res.open("a") as fh:
+            with res.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
 
 

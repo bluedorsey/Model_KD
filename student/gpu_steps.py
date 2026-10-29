@@ -12,6 +12,7 @@ printed and the run stops before the cache (free-tier APIs are slow); --allow-ap
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 
@@ -24,7 +25,9 @@ STEPS = ["env", "canary", "timing", "adapter", "gate", "cache", "scaling"]
 def run(*args, capture=False):
     """python -m <args> from the repo root; returns (exit code, last JSON line of stdout or None)."""
     print(">", "python -m", " ".join(map(str, args)), flush=True)
-    p = subprocess.run([sys.executable, "-m", *map(str, args)], cwd=ROOT, text=True,
+    # Windows defaults to cp1252; model text and progress bars are not ASCII
+    p = subprocess.run([sys.executable, "-m", *map(str, args)], cwd=ROOT, text=True, encoding="utf-8",
+                       errors="replace", env={**os.environ, "PYTHONUTF8": "1"},
                        stdout=subprocess.PIPE if capture else None)
     last = None
     if capture:
@@ -70,6 +73,7 @@ def env():
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--students", nargs="+", default=["Qwen/Qwen2.5-0.5B-Instruct"])
     ap.add_argument("--only", nargs="+", choices=STEPS, default=STEPS)
